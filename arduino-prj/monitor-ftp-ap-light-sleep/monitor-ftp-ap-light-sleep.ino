@@ -4,7 +4,7 @@
  *  Created on: Jan 25, 2024
  *      Author: Bruno Casu
  */
-
+ 
 #include <WEMOS_SHT3X.h>
 #include <ESP8266WiFi.h>
 #include <coredecls.h>  // crc32()
@@ -24,7 +24,7 @@
 #define GPIO_SET_ACCESS_POINT D5 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 
 // Remove when deploying in production environment
-#define DEBUG_MODE
+//#define DEBUG_MODE
 
 typedef enum {
   BLUE_LED_ON,
@@ -32,10 +32,17 @@ typedef enum {
 } led_status_t;
 
 typedef enum {
+  PROCESS_DATA_AQUISITION,
+  PROCESS_ACCESS_POINT
+} process_status_t;
+
+typedef enum {
   SENSOR_UNINITIALIZED,
   SENSOR_OK,
   SENSOR_ERROR
 } sensor_status_t;
+
+process_status_t process_status = PROCESS_DATA_AQUISITION;
 
 // SHT30 configuration
 SHT3X sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH); // Addr 0x45
@@ -57,7 +64,7 @@ FtpServer ftpSrv; // Handler
 // Data file configuration
 const char* sht30_1_file_path = "/sht30_addr_45_data.csv";
 const char* sht30_2_file_path = "/sht30_addr_44_data.csv";
-const char* csv_header_description = "Temperature(C);RelHumidity(RH%);VCC(V)"; // Added at the creation of the Data file
+const char* csv_header_description = "Timestamp(s);Temperature(C);RelHumidity(RH%);VCC(V)"; // Added at the creation of the Data file
 
 unsigned long time_ms;
 
@@ -211,8 +218,8 @@ void appendDataFile(float temp, float r_hum, const char *path) {
     }
     else {
       data_file.print("\n");
-      // data_file.print(time_s, 3); // Cannot print timestamp in Deep sleep mode
-      // data_file.print(";");
+      data_file.print(time_s, 3);
+      data_file.print(";");
       data_file.print(temp, 2);
       data_file.print(";");
       data_file.print(r_hum, 2);
@@ -269,10 +276,16 @@ void deviceSleep(int sleep_time) {
 #ifdef DEBUG_MODE
   Serial.print(F("\n-->Device Sleep for (ms): "));
   Serial.println(sleep_time);
-  delay(sleep_time);
-#else
-  ESP.deepSleepInstant(SLEEP_TIME_MS*1000, WAKE_RF_DISABLED);
+  Serial.print(F("Time since start of program (ms) = "));
+  Serial.println(millis());
+  Serial.flush();
 #endif // DEBUG_MODE
+  extern os_timer_t* timer_list;
+  timer_list = nullptr;  // stop (but don't disable) the 4 OS timers
+  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
+  wifi_fpm_open();
+  wifi_fpm_do_sleep(sleep_time*1000); // Sleep range = 10000 ~ 268,435,454 uS (0xFFFFFFE, 2^28-1)
+  delay(sleep_time + 1); // delay needs to be 1 ms longer than sleep or it only goes into Modem Sleep
 }
 
 
@@ -303,16 +316,28 @@ void setup() {
 #endif // DEBUG_MODE
   initSensors(); // Test SHT30 sensors
   initFS(); // Start File system
-
-  if (digitalRead(GPIO_SET_ACCESS_POINT) == LOW){
-    setLED(BLUE_LED_ON);
-    setAccessPoint();
-  }
-  else {
-    readSensors();
-  }
-  deviceSleep(SLEEP_TIME_MS); // After deep sleep the board resets
 }
 
 
-void loop() { }
+void loop() {
+  if (digitalRead(GPIO_SET_ACCESS_POINT) == LOW){
+    process_status = PROCESS_ACCESS_POINT;
+  }
+  else{
+    process_status = PROCESS_DATA_AQUISITION;
+  }
+
+  if (process_status == PROCESS_DATA_AQUISITION){
+#ifdef DEBUG_MODE
+    setLED(BLUE_LED_ON);
+    delay(10);
+    setLED(BLUE_LED_OFF);
+#endif // DEBUG_MODE
+    readSensors();
+    deviceSleep(SLEEP_TIME_MS);
+  }
+  else if (process_status == PROCESS_ACCESS_POINT){
+    setLED(BLUE_LED_ON);
+    setAccessPoint();
+  }
+}
