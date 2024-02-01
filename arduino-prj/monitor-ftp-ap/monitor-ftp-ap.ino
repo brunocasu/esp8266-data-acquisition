@@ -20,11 +20,11 @@
 // Defines for the data aquisition system
 #define SHT30_I2C_ADDR_PIN_HIGH 0x45  // Jumper NOT connected
 #define SHT30_I2C_ADDR_PIN_LOW 0x44  // Jumper connected
-#define SLEEP_TIME_MS 5000  // Interval between measurements
+#define SLEEP_TIME_MS 5000  // Interval between measurements in ms
 #define GPIO_SET_ACCESS_POINT D5 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 
 // Remove when deploying in production environment
-#define DEBUG_MODE
+// #define DEBUG_MODE
 
 typedef enum {
   BLUE_LED_ON,
@@ -278,7 +278,7 @@ void deviceSleep(int sleep_time) {
   Serial.println(sleep_time);
   delay(sleep_time);
 #else
-  // TODO add deep sleep function
+  delay(sleep_time); // TODO add deep sleep function
 #endif // DEBUG_MODE
 }
 

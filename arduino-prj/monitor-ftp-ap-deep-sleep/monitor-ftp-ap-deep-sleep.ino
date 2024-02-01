@@ -4,23 +4,23 @@
  *  Created on: Jan 25, 2024
  *      Author: Bruno Casu
  */
- 
+
 #include <WEMOS_SHT3X.h>
 #include <ESP8266WiFi.h>
 #include <coredecls.h>  // crc32()
 #include <PolledTimeout.h>
 #include <include/WiFiState.h>  // WiFiState structure details
 #include <LittleFS.h>
-//#include <ESP8266FtpServer.h>
 #include <Wire.h>
-#include <SimpleFTPServer.h>
+// #include <ESP8266FtpServer.h>
+#include <SimpleFTPServer.h> // Replacing <ESP8266FtpServer.h>
 
 #define SERIAL_SPEED  115200
 
 // Defines for the data aquisition system
 #define SHT30_I2C_ADDR_PIN_HIGH 0x45  // Jumper NOT connected
 #define SHT30_I2C_ADDR_PIN_LOW 0x44  // Jumper connected
-#define SLEEP_TIME_MS 5000  // Interval between measurements
+#define SLEEP_TIME_MS 5000  // Interval between measurements in ms
 #define GPIO_SET_ACCESS_POINT D5 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 
 // Remove when deploying in production environment
@@ -32,92 +32,45 @@ typedef enum {
 } led_status_t;
 
 typedef enum {
-  PROCESS_DATA_AQUISITION,
-  PROCESS_ACCESS_POINT
-} process_status_t;
-
-typedef enum {
   SENSOR_UNINITIALIZED,
   SENSOR_OK,
   SENSOR_ERROR
 } sensor_status_t;
 
-process_status_t process_status = PROCESS_DATA_AQUISITION;
-
 // SHT30 configuration
-SHT3X sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH);
-SHT3X sht30_2_handler(SHT30_I2C_ADDR_PIN_LOW);
+SHT3X sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH); // Addr 0x45
+SHT3X sht30_2_handler(SHT30_I2C_ADDR_PIN_LOW); // Addr 0x44
 sensor_status_t sht30_1_status = SENSOR_UNINITIALIZED;
 sensor_status_t sht30_2_status = SENSOR_UNINITIALIZED;
 
 // WiFi Access Point configuration
-IPAddress local_IP(192,168,4,22);
-IPAddress gateway(192,168,4,9);
+IPAddress local_IP(10,10,10,1);
+IPAddress gateway(10,10,10,1);
 IPAddress subnet_mask(255,255,255,0);
 const char* ssid_AP = "AP-ESP8266";
 
 // FTP configuration
 const char* user_FTP = "esp8266";
 const char* pwd_FTP = "esp8266";
-FtpServer ftpSrv;
+FtpServer ftpSrv; // Handler
 
 // Data file configuration
-//File sht30_1_DataFile;
-//File sht30_1_DataFile;
 const char* sht30_1_file_path = "/sht30_addr_45_data.csv";
 const char* sht30_2_file_path = "/sht30_addr_44_data.csv";
+const char* csv_header_description = "Temperature(C);RelHumidity(RH%);VCC(V)"; // Added at the creation of the Data file
 
-// ADC_MODE(ADC_VCC);
+unsigned long time_ms;
 
-void setup() {
-  // Init peripherals and GPIOs
-  WiFi.mode(WIFI_OFF); // Must turn the modem off; using disconnect won't work
-  WiFi.forceSleepBegin();
-  pinMode(LED_BUILTIN, OUTPUT);  // Initialize the LED_BUILTIN pin as an output
-  pinMode(GPIO_SET_ACCESS_POINT, INPUT_PULLUP);
-  Wire.begin();
-#ifdef DEBUG_MODE
-  Serial.begin(SERIAL_SPEED);
-  delay(200);
-  Serial.println("\n***ESP8266 Temperature Monitor***");
-  float result = ESP.getVcc();
-  Serial.print("Input VCC (V): ");
-  Serial.println((double) result * 0.001);
-#endif // DEBUG_MODE
-  // Test SHT30 sensors
-  sensorsInit();
-  // Start File system
-  initFS();
-}
+ADC_MODE(ADC_VCC);
 
-void loop() {
-  // Check if pin 14 is set to GND
-  if (digitalRead(GPIO_SET_ACCESS_POINT) == LOW){
-    // Change system to WiFi Access point for downloading the data file
-    process_status = PROCESS_ACCESS_POINT;
-  }
-  else{
-    process_status = PROCESS_DATA_AQUISITION;
-  }
-
-  if (process_status == PROCESS_DATA_AQUISITION){
-    setLED(BLUE_LED_ON);
-    delay(50);
-    setLED(BLUE_LED_OFF);
-    readSensors();
-    deviceSleep(SLEEP_TIME_MS);
-    listDir("/");
-    readFile(sht30_1_file_path);
-    delay(1000);
-  }
-  else if (process_status == PROCESS_ACCESS_POINT){
-    setLED(BLUE_LED_ON);
-    setAccessPoint();
-  }
-}
 /** PF definitions **/
 
-void sensorsInit() {
+
+/**
+ * Initialize both sensors with an inital I2C transaction
+ * If sensor not connect or faulty, set sensor status to SENSOR_ERROR
+ */
+void initSensors() {
   if(sht30_1_handler.get()==0){
     sht30_1_status = SENSOR_OK;
   }
@@ -133,7 +86,13 @@ void sensorsInit() {
   }
 }
 
+
+/**
+ * Read both sensors and write the returned values on the corresponding data file
+ * If sensor read fails set sensor to SENSOR_ERROR status
+ */
 void readSensors() {
+  time_ms = millis();
   if(sht30_1_handler.get()==0 && sht30_1_status == SENSOR_OK){
 #ifdef DEBUG_MODE
     Serial.print("\n-->Sensor ADDR");
@@ -143,7 +102,6 @@ void readSensors() {
     Serial.print("Relative Humidity (RH%): ");
     Serial.println(sht30_1_handler.humidity);
 #endif // DEBUG_MODE
-    // Write SHT30 data into Data File
     appendDataFile(sht30_1_handler.cTemp, sht30_1_handler.humidity, sht30_1_file_path);
   }
   else{
@@ -153,7 +111,8 @@ void readSensors() {
 #endif // DEBUG_MODE
     sht30_1_status = SENSOR_ERROR;
   }
-
+  // Repeat for next sensor
+  time_ms = millis();
   if(sht30_2_handler.get()==0 && sht30_2_status == SENSOR_OK){
 #ifdef DEBUG_MODE
     Serial.print("\n-->Sensor ADDR");
@@ -163,7 +122,6 @@ void readSensors() {
     Serial.print("Relative Humidity (RH%): ");
     Serial.println(sht30_2_handler.humidity);
 #endif // DEBUG_MODE
-    // Write SHT30 data into Data File
     appendDataFile(sht30_2_handler.cTemp, sht30_2_handler.humidity, sht30_2_file_path);
   }
   else{
@@ -175,19 +133,23 @@ void readSensors() {
   }
 }
 
+
+/**
+ * Configures the ESP8266 as WiFi Access Point, and starts the FTP server
+ */
 void setAccessPoint() {
   // Configure WiFi Access point
-  WiFi.softAPConfig(local_IP, gateway, subnet_mask);
+  WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid_AP); // No password for connecting
+  WiFi.softAPConfig(local_IP, gateway, subnet_mask);
 #ifdef DEBUG_MODE
-  Serial.print("\n-->WiFi SSID: AP-ESP8266 (IP Addr): ");
+  Serial.print("\n-->WiFi SSID: AP-ESP8266 (FTP Server IP Addr): ");
   Serial.println(WiFi.softAPIP());
-
-  // Start FTP server
-  Serial.println("FTP Server\nWaiting for connections...");
+  Serial.println("Waiting for connections...");
 #endif // DEBUG_MODE
+  // Start FTP server
   ftpSrv.begin(user_FTP, pwd_FTP);
-  ftpSrv.setLocalIp(WiFi.softAPIP());
+  ftpSrv.setLocalIp(WiFi.softAPIP()); // Must setLocalIP as the same as the one in softAPConfig()
   while (digitalRead(GPIO_SET_ACCESS_POINT) == LOW) {
     ftpSrv.handleFTP();
     delay(10);
@@ -197,68 +159,98 @@ void setAccessPoint() {
   WiFi.forceSleepBegin();
 }
 
+
+/**
+ * Mount the file system (LittleFS)
+ * If the Data files are not created (first boot), create the Data files
+ */
 void initFS() {
   File new_file;
 #ifdef DEBUG_MODE
   Serial.println("\n-->LittleFS start");
-  LittleFS.format();
+  LittleFS.format(); // WARNING When in DEBUG mode the FS is formated at reset
 #endif // DEBUG_MODE
   if (!LittleFS.begin()) {
-    // LittleFS mount failed
-    Serial.println("\n-->LittleFS mount failed");
-    return;
+    return; // LittleFS mount failed
   }
-  else{
-    // Create file for SHT30 Addr 45 data // TODO remove seral prints
-    new_file = LittleFS.open(sht30_1_file_path, "w");
+  // Create Data Files (if they do not exist)
+  if (readFile(sht30_1_file_path) == 0){ // File does not exist
+    new_file = LittleFS.open(sht30_1_file_path, "w"); // Create file
     if (!new_file) {
-      Serial.println("Failed to open file for writing");
-      return;
+      return; // Failed creating file
     }
-    if (new_file.print("Temperature(C);RelHumidity(RH%)")) {
-      Serial.println("File written");
-    } else {
-      Serial.println("Write failed");
+    else {
+      new_file.print(csv_header_description); // Write CSV header
+      new_file.close();
     }
-    new_file.close();
+  }
+  if (readFile(sht30_2_file_path) == 0){ // File does not exist
+    new_file = LittleFS.open(sht30_2_file_path, "w"); // Create file
+    if (!new_file) {
+      return; // Failed creating file
+    }
+    else {
+      new_file.print(csv_header_description); // Write CSV header
+      new_file.close();
+    }
   }
 }
 
+
+/**
+ * Append the sensor data into the Data files
+ * Include internal VCC reading on the data file
+ */
 void appendDataFile(float temp, float r_hum, const char *path) {
-  //sht30_1_DataFile = LittleFS.open(sht30_1_file_path, "a");
+  float vcc_reading = ESP.getVcc();
+  float time_s = time_ms*0.001; // Time of execution is read at the start of reading the sensor data
   File data_file = LittleFS.open(path, "a");
     if (!data_file) {
       Serial.print("Unable to open file");
       Serial.println(path);
-    } else {
+    }
+    else {
       data_file.print("\n");
+      // data_file.print(time_s, 3); // Cannot print timestamp in Deep sleep mode
+      // data_file.print(";");
       data_file.print(temp, 2);
       data_file.print(";");
       data_file.print(r_hum, 2);
-      //data_file.flush();
+      data_file.print(";");
+      data_file.print(vcc_reading*0.001, 2);
+      data_file.flush();
     }
     data_file.close();
 }
 
-void readFile(const char *path) {
-  Serial.printf("\nReading file: %s\n", path);
 
+/**
+ * Read file from the FS
+ */
+int readFile(const char *path) {
   File file = LittleFS.open(path, "r");
   if (!file) {
-    Serial.println("Failed to open file for reading");
-    return;
+    return 0; // File does not exist
   }
-
-  Serial.print("Read from file:\n");
-  while (file.available()) { Serial.write(file.read()); }
-  file.close();
+  else {
+#ifdef DEBUG_MODE
+    Serial.printf("\nReading file: %s\n", path);
+    Serial.print("Content:\n");
+    while (file.available()) { Serial.write(file.read()); }
+#endif // DEBUG_MODE
+    file.close();
+    return 1;
+  }
 }
 
+
+/**
+ * List the files in the selected directory in the FS
+ * Only used for DEBUG
+ */
 void listDir(const char *dirname) {
-  Serial.printf("\nListing directory: %s\n", dirname);
-
   Dir root = LittleFS.openDir(dirname);
-
+  Serial.printf("\nListing directory: %s\n", dirname);
   while (root.next()) {
     File file = root.openFile("r");
     Serial.print("  FILE: ");
@@ -269,16 +261,24 @@ void listDir(const char *dirname) {
   }
 }
 
+
+/**
+ * Set the device in sleep mode (NOP)
+ */
 void deviceSleep(int sleep_time) {
 #ifdef DEBUG_MODE
   Serial.print(F("\n-->Device Sleep for (ms): "));
   Serial.println(sleep_time);
   delay(sleep_time);
 #else
-  // TODO add deep sleep function
+  ESP.deepSleepInstant(SLEEP_TIME_MS*1000, WAKE_RF_DISABLED);
 #endif // DEBUG_MODE
 }
 
+
+/**
+ * Set the LED status
+ */
 void setLED(led_status_t cmd) {
   if(cmd == BLUE_LED_ON){
     digitalWrite(LED_BUILTIN, LOW);
@@ -287,3 +287,32 @@ void setLED(led_status_t cmd) {
     digitalWrite(LED_BUILTIN, HIGH);
   }
 }
+
+
+void setup() {
+  WiFi.mode(WIFI_OFF); // Must turn the modem off; using disconnect won't work
+  WiFi.forceSleepBegin();
+  pinMode(LED_BUILTIN, OUTPUT);  // Initialize the LED_BUILTIN pin as an output
+  setLED(BLUE_LED_OFF);
+  pinMode(GPIO_SET_ACCESS_POINT, INPUT_PULLUP);
+  Wire.begin();
+#ifdef DEBUG_MODE
+  Serial.begin(SERIAL_SPEED);
+  delay(200);
+  Serial.println("\n***ESP8266 Temperature Monitor***");
+#endif // DEBUG_MODE
+  initSensors(); // Test SHT30 sensors
+  initFS(); // Start File system
+
+  if (digitalRead(GPIO_SET_ACCESS_POINT) == LOW){
+    setLED(BLUE_LED_ON);
+    setAccessPoint();
+  }
+  else {
+    readSensors();
+  }
+  deviceSleep(SLEEP_TIME_MS); // After deep sleep the board resets
+}
+
+
+void loop() { }
