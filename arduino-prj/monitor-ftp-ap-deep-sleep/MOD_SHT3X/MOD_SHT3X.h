@@ -1,15 +1,15 @@
 
-#ifndef __WEMOS_SHT3X_H
-#define __WEMOS_SHT3X_H
+#ifndef __MOD_SHT3X_H
+#define __MOD_SHT3X_H
 
 
 #if ARDUINO >= 100
- #include "Arduino.h"
+ #include "../Arduino.h"
 #else
- #include "WProgram.h"
+ #include "../WProgram.h"
 #endif
 
-#include "Wire.h"
+#include "../Wire.h"
 
 class SHT3X{
 public:

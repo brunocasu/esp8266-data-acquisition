@@ -180,6 +180,12 @@ void initFS() {
   if (!LittleFS.begin()) {
     return; // LittleFS mount failed
   }
+#ifdef DEBUG_MODE
+  LittleFS.info(fs_info);
+  Serial.print("LittleFS Mount OK - FS Size (B):");
+  Serial.println(fs_info.totalBytes);
+#endif // DEBUG_MODE
+
   // Create Data Files (if they do not exist)
   if (readFile(sht30_1_file_path) == 0){ // File does not exist
     new_file = LittleFS.open(sht30_1_file_path, "w"); // Create file

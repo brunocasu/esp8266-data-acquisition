@@ -1,8 +1,9 @@
-#include "WEMOS_SHT3X.h"
+#include "MOD_SHT3X.h"
 
-/* Motor()
-
+/*
+ * Edited by Bruno Casu - 02/2024
 */
+
 SHT3X::SHT3X(uint8_t address)
 {
 	Wire.begin();
@@ -24,7 +25,7 @@ byte SHT3X::get()
 	if (Wire.endTransmission()!=0) 
 		return 1;  
 
-	delay(500);
+	delay(1); // reduced delay betey master transmit and receive (500 ms is to much)
 
 	// Request 6 bytes of data
 	Wire.requestFrom(_address, 6);
@@ -35,7 +36,7 @@ byte SHT3X::get()
 		data[i]=Wire.read();
 	};
 	
-	delay(50);
+	delay(1);
 	
 	if (Wire.available()!=0) 
 		return 2;
