@@ -1,6 +1,6 @@
 # d1-mini-temp-monitor
 Monitoring system for temperature and relative humidity using Wemos D1 Mini (ESP-8266EX based system) and SHT30 sensor.
-![alt text](https://github.com/brunocasu/d1-mini-temp-monitor/master/doc/system_arch.png?raw=true)
+![alt text](https://github.com/brunocasu/d1-mini-temp-monitor/blob/master/doc/system_arch.png?raw=true)
 
 ## Arduino projects for the ESP8266 on Wemos D1 Mini v4.0.0.0:
 ### monitor-ftp-ap-deep-sleep
