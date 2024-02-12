@@ -19,7 +19,7 @@
 // Defines for the data aquisition system
 #define SHT30_I2C_ADDR_PIN_HIGH 0x45  // Jumper NOT connected
 #define SHT30_I2C_ADDR_PIN_LOW 0x44  // Jumper connected
-#define SLEEP_TIME_MS 300000  // Interval between measurements in ms
+#define SLEEP_TIME_MS 3600000  // Interval between measurements in ms
 #define GPIO_SET_ACCESS_POINT D5 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 
 // Remove when deploying in production environment
