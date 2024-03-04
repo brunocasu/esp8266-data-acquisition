@@ -11,78 +11,32 @@
 #include <include/WiFiState.h>  // WiFiState structure details
 #include <LittleFS.h>
 #include <Wire.h>
-// #include <ESP8266FtpServer.h>
+#include <SoftwareSerial.h>
 #include <SimpleFTPServer.h> // Replacing <ESP8266FtpServer.h>
+#include <cozir.h>
+#include <sht30.h>
+
 
 #define SERIAL_SPEED  115200
 
 // Defines for the data aquisition system
 #define SHT30_I2C_ADDR_PIN_HIGH 0x45  // Jumper NOT connected
 #define SHT30_I2C_ADDR_PIN_LOW 0x44  // Jumper connected
-#define SLEEP_TIME_MS 3600000  // Interval between measurements in ms
-#define GPIO_SET_ACCESS_POINT D5 // On Wemos D1 Mini - Pin number 14 (GPIO14)
+#define SLEEP_TIME_MS 5000  // Interval between measurements in ms
+#define GPIO_SET_ACCESS_POINT 14 // On Wemos D1 Mini - Pin number 14 (GPIO14)
+#define GPIO_VIRTUAL_SERIAL_TX 12 // On Wemos D1 Mini - Pin number 12 (GPIO12)
+#define GPIO_VIRTUAL_SERIAL_RX 13 // On Wemos D1 Mini - Pin number 13 (GPIO13)
 
 // Remove when deploying in production environment
-//#define DEBUG_MODE
+#define DEBUG_MODE
 
-// SHT30 configuration
-class SHT3X{
-public:
-	SHT3X(uint8_t address=0x45);
-	byte get(void);
-	float cTemp=0;
-	float fTemp=0;
-	float humidity=0;
-
-private:
-	uint8_t _address;
-
-};
-SHT3X::SHT3X(uint8_t address)
-{
-	Wire.begin();
-	_address=address;
-}
-
-byte SHT3X::get()
-{
-	unsigned int data[6];
-
-	// Start I2C Transmission
-	Wire.beginTransmission(_address);
-	// Send measurement command
-	Wire.write(0x2C);
-	Wire.write(0x06);
-	// Stop I2C transmission
-	if (Wire.endTransmission()!=0)
-		return 1;
-
-	delay(1); // reduced delay betey master transmit and receive (500 ms is to much)
-
-	// Request 6 bytes of data
-	Wire.requestFrom(_address, 6);
-
-	// Read 6 bytes of data
-	// cTemp msb, cTemp lsb, cTemp crc, humidity msb, humidity lsb, humidity crc
-	for (int i=0;i<6;i++) {
-		data[i]=Wire.read();
-	};
-
-	delay(1);
-
-	if (Wire.available()!=0)
-		return 2;
-
-	// Convert the data
-	cTemp = ((((data[0] * 256.0) + data[1]) * 175) / 65535.0) - 45;
-	fTemp = (cTemp * 1.8) + 32;
-	humidity = ((((data[3] * 256.0) + data[4]) * 100) / 65535.0);
-
-	return 0;
-}
-SHT3X sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH); // Addr 0x45
-SHT3X sht30_2_handler(SHT30_I2C_ADDR_PIN_LOW); // Addr 0x44
-
+// CO2 sensor
+SoftwareSerial virtual_serial(GPIO_VIRTUAL_SERIAL_RX, GPIO_VIRTUAL_SERIAL_TX);
+COZIR czr_handler(&virtual_serial);
+     
+// Temperature and humidity sensor
+SHT30 sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH); // Addr 0x45
+SHT30 sht30_2_handler(SHT30_I2C_ADDR_PIN_LOW); // Addr 0x44
 
 // WiFi Access Point configuration
 IPAddress local_IP(10,10,10,1); // FTP server address
@@ -101,8 +55,8 @@ FSInfo fs_info;
 // Data file configuration
 const char* sht30_1_file_path = "/sht30_addr_45_data.csv";
 const char* sht30_2_file_path = "/sht30_addr_44_data.csv";
-const char* csv_header_description = "Temperature(C);RelHumidity(RH%)"; // Added at the creation of the Data file
-
+const char* csv_header_description = "Timestamp(ms);Temperature(C);RelHumidity(RH%)"; // Added at the creation of the Data file
+unsigned long cycle_counter = 0;
 
 /** PF definitions **/
 
@@ -183,7 +137,8 @@ void initFS() {
  * Include internal VCC reading on the data file
  */
 void appendDataFile(float temp, float r_hum, const char *path) {
-
+  int exe_time = millis();
+  int timestamp_ms = (cycle_counter*SLEEP_TIME_MS) + exe_time;
   File data_file = LittleFS.open(path, "a");
     if (!data_file) {
       return;
@@ -219,7 +174,10 @@ int readFile(const char *path) {
  * If sensor read fails set sensor to SENSOR_ERROR status
  */
 void readSensors() {
-  if(sht30_1_handler.get()==0){
+  uint32_t cozir_ctr = 0;
+  uint32_t co2_ppm = 0;
+  // SHT30
+  if(sht30_1_handler.read_single_shot() == SHT30_READ_OK){
     appendDataFile(sht30_1_handler.cTemp, sht30_1_handler.humidity, sht30_1_file_path);
 #ifdef DEBUG_MODE
     Serial.print("\n-->Sensor ADDR");
@@ -231,7 +189,7 @@ void readSensors() {
 #endif // DEBUG_MODE
   }
   // Repeat for next sensor
-  if(sht30_2_handler.get()==0){
+  if(sht30_2_handler.read_single_shot() == SHT30_READ_OK){
     appendDataFile(sht30_2_handler.cTemp, sht30_2_handler.humidity, sht30_2_file_path);
 #ifdef DEBUG_MODE
     Serial.print("\n-->Sensor ADDR");
@@ -242,10 +200,38 @@ void readSensors() {
     Serial.println(sht30_2_handler.humidity);
 #endif // DEBUG_MODE
   }
+  
+  // CO2 Sensor
+  // The GSS CO2 sensor does not provide an accurate measurement on the first attempts, must be polled (up to 5x)
+#ifdef DEBUG_MODE
+  Serial.print("-->GSS SPRINTIR VERSION: ");  
+#endif // DEBUG_MODE
+  delay(100);
+  czr_handler.getVersionSerial();
+  delay(5);
+  while (virtual_serial.available())
+  {
+    Serial.write(virtual_serial.read());
+  }
+  delay(100);
+  
+  while (co2_ppm<100 && cozir_ctr<5){
+    //delay(100);
+    co2_ppm = czr_handler.CO2();
+    co2_ppm *= czr_handler.getPPMFactor();  // most of time PPM = one.
+    cozir_ctr++;
+  }
+#ifdef DEBUG_MODE
+  Serial.print("\n-->CO2(ppm)=\t");
+  Serial.println(co2_ppm);    
+#endif // DEBUG_MODE
+
 }
 
 
 void setup() {
+  uint32_t cozir_ctr = 0;
+  uint32_t co2_ppm = 0;
 #ifdef DEBUG_MODE
   Serial.begin(SERIAL_SPEED);
   delay(10);
@@ -257,20 +243,36 @@ void setup() {
   Wire.begin(); // I2C
   WiFi.mode(WIFI_OFF); // Must turn the modem off; using disconnect won't work
   WiFi.forceSleepBegin();
+
+  virtual_serial.begin(9600);
+  czr_handler.init();
+
+  system_rtc_mem_read(64, &cycle_counter, 4);
   
   initFS(); // Start File system
   readSensors(); // Read sensor data and save on FS
 
+  sht30_2_handler.read_status_register();
+  Serial.print("Status Register SHT30 45: ");
+  Serial.println(sht30_2_handler.status_reg, HEX);
+
   if (digitalRead(GPIO_SET_ACCESS_POINT) == LOW){ // Change to AP mode
     digitalWrite(LED_BUILTIN, LOW); // LED on
+    cycle_counter = 0;
+    system_rtc_mem_write(64, &cycle_counter, 4); // Reset the cycle counter
     setAccessPoint();
   }
+
+  cycle_counter++;
+  system_rtc_mem_write(64, &cycle_counter, 4);
   
 #ifdef DEBUG_MODE
-  Serial.print(F("\n-->Device Sleep for (ms): "));
+  Serial.print(F("\n-->Device will deep Sleep for (ms): "));
   Serial.println(SLEEP_TIME_MS);
   Serial.print(F("Time since start of execution (ms) = "));
   Serial.println(millis());
+  Serial.print(F("Number of Cycles executed = "));
+  Serial.println(cycle_counter);
   Serial.flush();
 #endif // DEBUG_MODE
 
