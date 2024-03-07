@@ -3,6 +3,8 @@
  *
  *  Created on: Jan 25, 2024
  *      Author: Bruno Casu
+ *
+ *  Version 0.1 (07/03/2024)
  */
  
 #include <ESP8266WiFi.h>
@@ -22,21 +24,27 @@
 // Defines for the data aquisition system
 #define SHT30_I2C_ADDR_PIN_HIGH 0x45  // Jumper NOT connected
 #define SHT30_I2C_ADDR_PIN_LOW 0x44  // Jumper connected
-#define SLEEP_TIME_MS 5000  // Interval between measurements in ms
+#define SLEEP_TIME_MS 1200000  // Interval between measurements in ms (time to execute the program ~1500ms)
 #define GPIO_SET_ACCESS_POINT 14 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 #define GPIO_VIRTUAL_SERIAL_TX 12 // On Wemos D1 Mini - Pin number 12 (GPIO12)
 #define GPIO_VIRTUAL_SERIAL_RX 13 // On Wemos D1 Mini - Pin number 13 (GPIO13)
 
 // Remove when deploying in production environment
-#define DEBUG_MODE
+//#define DEBUG_MODE
+
+#define CYCLE_COUNTER_RST 10000000  // When resetig via GPIO, RTC memory gets wrong counter value - must be reset
+unsigned long cycle_counter = 0;
 
 // CO2 sensor
 SoftwareSerial virtual_serial(GPIO_VIRTUAL_SERIAL_RX, GPIO_VIRTUAL_SERIAL_TX);
 COZIR czr_handler(&virtual_serial);
+int sprintir_co2_status = 0;
      
 // Temperature and humidity sensor
 SHT30 sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH); // Addr 0x45
 SHT30 sht30_2_handler(SHT30_I2C_ADDR_PIN_LOW); // Addr 0x44
+int sht30_1_status = 0;
+int sht30_2_status = 0;
 
 // WiFi Access Point configuration
 IPAddress local_IP(10,10,10,1); // FTP server address
@@ -55,10 +63,36 @@ FSInfo fs_info;
 // Data file configuration
 const char* sht30_1_file_path = "/sht30_addr_45_data.csv";
 const char* sht30_2_file_path = "/sht30_addr_44_data.csv";
-const char* csv_header_description = "Timestamp(ms);Temperature(C);RelHumidity(RH%)"; // Added at the creation of the Data file
-unsigned long cycle_counter = 0;
+const char* sht30_csv_header_description = "Counter;Temperature(C);RelHumidity(RH%)"; // Added at the creation of the Data file
+const char* sprintir_co2_file_path = "/sprintir_co2_data.csv";
+const char* sprintir_co2_csv_header_description = "Counter;CO2Level(ppm)"; // Added at the creation of the Data file
+
 
 /** PF definitions **/
+
+/**
+ * SPRINTIR-W-F-100 CO2 sensor polling mode (runs a number of readings on the sensor, returns when valid reading is detected)
+ */
+int sprintirPoll(int reps){
+  int co2_ppm=0, k=0;
+  virtual_serial.begin(9600);
+  while(co2_ppm<100 && k<reps){
+      co2_ppm = czr_handler.CO2();
+      co2_ppm *= czr_handler.getPPMFactor();  // In Sprintir WF 100, the correction factor is 100
+      k++;
+    }
+  virtual_serial.end();
+  return co2_ppm;
+}
+
+/**
+ * SPRINTIR-W-F-100 CO2 sensor calibration with fresh air reference
+ */
+void sprintirCalibrate(){
+  virtual_serial.begin(9600);
+  czr_handler.calibrateFreshAir();
+  virtual_serial.end();
+}
 
 
 /**
@@ -88,154 +122,176 @@ void setAccessPoint() {
 
 
 /**
- * Mount the file system (LittleFS)
- * If the Data files are not created (first boot), create the Data files
+ * Start LittleFS
  */
-void initFS() {
-  File new_file;
-#ifdef DEBUG_MODE
-  Serial.println("\n-->LittleFS start");
-  LittleFS.format(); // WARNING When in DEBUG mode the FS is formated at reset
-#endif // DEBUG_MODE
+void mountLittleFS(){
   if (!LittleFS.begin()) {
     return; // LittleFS mount failed
   }
 #ifdef DEBUG_MODE
   LittleFS.info(fs_info);
-  Serial.print("LittleFS Mount OK\nTotal FS Size (kB):");
+  Serial.print("-->LittleFS Mount OK\nTotal FS Size (kB):");
   Serial.println(fs_info.totalBytes*0.001);
   Serial.print("Used (kB): ");
   Serial.println(fs_info.usedBytes*0.001);
 #endif // DEBUG_MODE
+}
 
-  // Create Data Files (if they do not exist)
-  if (readFile(sht30_1_file_path) == 0){ // File does not exist
-    new_file = LittleFS.open(sht30_1_file_path, "w"); // Create file
-    if (!new_file) {
-      return; // Failed creating file
-    }
-    else {
-      new_file.print(csv_header_description); // Write CSV header
-      new_file.close();
+
+/**
+ * Read and save sensor data on data files
+ */
+void dataAcquisition() {
+  int co2_ppm = 0;
+
+  if (LittleFS.exists(sht30_1_file_path)){ // File exists
+    if(sht30_1_handler.read_single_shot() == SHT30_READ_OK){
+      appendSHT30Data(SHT30_I2C_ADDR_PIN_HIGH, sht30_1_handler.cTemp, sht30_1_handler.humidity, sht30_1_file_path); // Append sensor data
     }
   }
-  if (readFile(sht30_2_file_path) == 0){ // File does not exist
-    new_file = LittleFS.open(sht30_2_file_path, "w"); // Create file
-    if (!new_file) {
-      return; // Failed creating file
+  if (LittleFS.exists(sht30_2_file_path)){ // File exists
+    if(sht30_2_handler.read_single_shot() == SHT30_READ_OK){
+      appendSHT30Data(SHT30_I2C_ADDR_PIN_LOW, sht30_2_handler.cTemp, sht30_2_handler.humidity, sht30_2_file_path); // Append sensor data
     }
-    else {
-      new_file.print(csv_header_description); // Write CSV header
-      new_file.close();
+  }
+  if (LittleFS.exists(sprintir_co2_file_path)){ // File exists
+    co2_ppm = sprintirPoll(5);
+    if (co2_ppm >= 100){
+      appendSprintirCO2Data(co2_ppm, sprintir_co2_file_path);
     }
   }
 }
 
 
 /**
- * Append the sensor data into the Data files
- * Include internal VCC reading on the data file
+ * Check what sensors are connected at first boot, and create files for each sensor
+ * If sensor is not present at first boot, the file is not created, and following measurements are not taken
+ * This prevents polling inactive of faulty sensors
  */
-void appendDataFile(float temp, float r_hum, const char *path) {
-  int exe_time = millis();
-  int timestamp_ms = (cycle_counter*SLEEP_TIME_MS) + exe_time;
+void createDataFiles(){
+  int calibration_ret_val;
+  File new_file;
+  if (sht30_1_handler.read_status_register() == SHT30_READ_OK){ // Check if sensor is OK
+    if (!LittleFS.exists(sht30_1_file_path)){ // File does not exist
+      new_file = LittleFS.open(sht30_1_file_path, "w");
+      if (!new_file) {
+        return; // Failed creating file
+      } 
+      else{
+        new_file.print(sht30_csv_header_description); // Write CSV header
+        new_file.close();
+      }
+    }
+  }
+#ifdef DEBUG_MODE
+  else {
+    Serial.println("createDataFiles: SHT30 1 ADDR 45 NOT CONNECTED OR FAULT");
+  }
+#endif // DEBUG_MODE
+
+  // Repeat for next SHT30 sensor
+  if (sht30_2_handler.read_status_register() == SHT30_READ_OK){
+    if (!LittleFS.exists(sht30_2_file_path)){ // File does not exist
+      new_file = LittleFS.open(sht30_2_file_path, "w");
+      if (!new_file) {
+        return; // Failed creating file
+      } 
+      else{
+        new_file.print(sht30_csv_header_description); // Write CSV header
+        new_file.close();
+      }
+    }
+  }
+#ifdef DEBUG_MODE
+  else {
+    Serial.println("createDataFiles: SHT30 2 ADDR 44 NOT CONNECTED OR FAULT");
+  }
+#endif // DEBUG_MODE
+
+  // CO2 sensor
+  if (sprintirPoll(5) >= 100){
+    sprintirCalibrate();
+    if (!LittleFS.exists(sprintir_co2_file_path)){ // File does not exist
+      new_file = LittleFS.open(sprintir_co2_file_path, "w");
+      if (!new_file) {
+        return; // Failed creating file
+      } 
+      else{
+        new_file.print(sprintir_co2_csv_header_description); // Write CSV header
+        new_file.close();
+      }
+    }
+  }
+#ifdef DEBUG_MODE
+  else {
+    Serial.println("createDataFiles: CO2 SENSOR NOT CONNECTED OR FAULT");
+  }
+#endif // DEBUG_MODE
+}
+
+
+/**
+ * Append the SHT30 data into the Data files
+ */
+void appendSHT30Data(uint8_t i2c_addr, float temp, float r_hum, const char *path) {
   File data_file = LittleFS.open(path, "a");
     if (!data_file) {
       return;
     }
     else {
       data_file.print("\n");
+      data_file.print(cycle_counter);
+      data_file.print(";");
       data_file.print(temp, 2);
       data_file.print(";");
       data_file.print(r_hum, 2);
       data_file.flush(); // Ensure writting before returning
     }
     data_file.close();
+#ifdef DEBUG_MODE
+    Serial.print("\n-->SHT30 ");
+    Serial.print(i2c_addr, HEX);
+    Serial.print(" T(C): ");
+    Serial.print(temp);
+    Serial.print(" RH(RH%): ");
+    Serial.print(r_hum);
+#endif // DEBUG_MODE
 }
 
 
 /**
- * Read file from the FS
+ * Append the CO2 data into the Data file
  */
-int readFile(const char *path) {
-  File file = LittleFS.open(path, "r");
-  if (!file) {
-    return 0; // File does not exist
-  }
-  else {
-    file.close();
-    return 1; // File already exist
-  }
-}
-
-
-/**
- * Read both sensors and write the returned values on the corresponding data file
- * If sensor read fails set sensor to SENSOR_ERROR status
- */
-void readSensors() {
-  uint32_t cozir_ctr = 0;
-  uint32_t co2_ppm = 0;
-  // SHT30
-  if(sht30_1_handler.read_single_shot() == SHT30_READ_OK){
-    appendDataFile(sht30_1_handler.cTemp, sht30_1_handler.humidity, sht30_1_file_path);
+void appendSprintirCO2Data(int co2_ppm, const char *path) {
+  File data_file = LittleFS.open(path, "a");
+    if (!data_file) {
+      return;
+    }
+    else {
+      data_file.print("\n");
+      data_file.print(cycle_counter);
+      data_file.print(";");
+      data_file.print(co2_ppm);
+      data_file.flush(); // Ensure writting before returning
+    }
+    data_file.close();
 #ifdef DEBUG_MODE
-    Serial.print("\n-->Sensor ADDR");
-    Serial.println(SHT30_I2C_ADDR_PIN_HIGH, HEX);
-    Serial.print("Temperature (C): ");
-    Serial.println(sht30_1_handler.cTemp);
-    Serial.print("Relative Humidity (RH%): ");
-    Serial.println(sht30_1_handler.humidity);
+    Serial.print("\n-->CO2(ppm)=\t");
+    Serial.println(co2_ppm);
 #endif // DEBUG_MODE
-  }
-  // Repeat for next sensor
-  if(sht30_2_handler.read_single_shot() == SHT30_READ_OK){
-    appendDataFile(sht30_2_handler.cTemp, sht30_2_handler.humidity, sht30_2_file_path);
-#ifdef DEBUG_MODE
-    Serial.print("\n-->Sensor ADDR");
-    Serial.println(SHT30_I2C_ADDR_PIN_LOW, HEX);
-    Serial.print("Temperature (C): ");
-    Serial.println(sht30_2_handler.cTemp);
-    Serial.print("Relative Humidity (RH%): ");
-    Serial.println(sht30_2_handler.humidity);
-#endif // DEBUG_MODE
-  }
-  
-  // CO2 Sensor
-  // The GSS CO2 sensor does not provide an accurate measurement on the first attempts, must be polled (up to 5x)
-#ifdef DEBUG_MODE
-  Serial.print("-->GSS SPRINTIR VERSION: ");  
-#endif // DEBUG_MODE
-  delay(100);
-  czr_handler.getVersionSerial();
-  delay(5);
-  while (virtual_serial.available())
-  {
-    Serial.write(virtual_serial.read());
-  }
-  delay(100);
-  
-  while (co2_ppm<100 && cozir_ctr<5){
-    //delay(100);
-    co2_ppm = czr_handler.CO2();
-    co2_ppm *= czr_handler.getPPMFactor();  // most of time PPM = one.
-    cozir_ctr++;
-  }
-#ifdef DEBUG_MODE
-  Serial.print("\n-->CO2(ppm)=\t");
-  Serial.println(co2_ppm);    
-#endif // DEBUG_MODE
-
 }
 
 
 void setup() {
-  uint32_t cozir_ctr = 0;
-  uint32_t co2_ppm = 0;
+  system_rtc_mem_read(64, &cycle_counter, 4); // Copy RTC memory value in current cycle counter
+  if (cycle_counter > CYCLE_COUNTER_RST){cycle_counter = 0;}
 #ifdef DEBUG_MODE
   Serial.begin(SERIAL_SPEED);
-  delay(10);
-  Serial.println("\n***ESP8266 Temperature Monitor***");
+  delay(100);
+  Serial.println("\n\n***ESP8266 Temperature, Humidity and CO2 Monitor***");
+  Serial.print(F("Number of Cycles executed = "));
+  Serial.println(cycle_counter);
+  Serial.flush();
 #endif // DEBUG_MODE
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH); // LED off
@@ -243,18 +299,17 @@ void setup() {
   Wire.begin(); // I2C
   WiFi.mode(WIFI_OFF); // Must turn the modem off; using disconnect won't work
   WiFi.forceSleepBegin();
+  mountLittleFS(); // Mount the file system
+  czr_handler.init(); // Initialize CO2 sensor handler
 
-  virtual_serial.begin(9600);
-  czr_handler.init();
+  if (cycle_counter == 0){ // First boot: check which sensors are present and OK
+    createDataFiles();     
+  } 
+  dataAcquisition(); // Read sensors and save data
 
-  system_rtc_mem_read(64, &cycle_counter, 4);
-  
-  initFS(); // Start File system
-  readSensors(); // Read sensor data and save on FS
-
-  sht30_2_handler.read_status_register();
-  Serial.print("Status Register SHT30 45: ");
-  Serial.println(sht30_2_handler.status_reg, HEX);
+  // Increment and save the current cycle counter value in RTC memory
+  cycle_counter++;
+  system_rtc_mem_write(64, &cycle_counter, 4);
 
   if (digitalRead(GPIO_SET_ACCESS_POINT) == LOW){ // Change to AP mode
     digitalWrite(LED_BUILTIN, LOW); // LED on
@@ -263,16 +318,11 @@ void setup() {
     setAccessPoint();
   }
 
-  cycle_counter++;
-  system_rtc_mem_write(64, &cycle_counter, 4);
-  
 #ifdef DEBUG_MODE
   Serial.print(F("\n-->Device will deep Sleep for (ms): "));
   Serial.println(SLEEP_TIME_MS);
-  Serial.print(F("Time since start of execution (ms) = "));
+  Serial.print(F("Execution time (ms) = "));
   Serial.println(millis());
-  Serial.print(F("Number of Cycles executed = "));
-  Serial.println(cycle_counter);
   Serial.flush();
 #endif // DEBUG_MODE
 
