@@ -1,4 +1,4 @@
-# d1-mini-temp-monitor
+# esp8266-data-aqcuisition
 This repository contains projects using Wemos D1 Mini (ESP-8266EX based system) for data collection, using temperature, humdity and CO2 sensors.
 ![alt text](https://github.com/brunocasu/d1-mini-temp-monitor/blob/master/doc/system_arch.png?raw=true)
 
