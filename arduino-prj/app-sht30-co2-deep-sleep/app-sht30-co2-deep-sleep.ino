@@ -1,5 +1,5 @@
 /*
- * monitor-ftp-ap-deep-sleep.ino
+ * app-sht30-co2-deep-sleep.ino
  *
  * This program is free software: you can redistribute it and/or modify it under the terms of the
  * GNU General Public License as published by the Free Software Foundation, either version 3 of
@@ -15,13 +15,11 @@
  *  Created on: Jan 25, 2024
  *      Author: Bruno Casu
  *
- *  Version 0.1 (07/03/2024)
+ *  Version 1.0 (----, 2024)
  */
  
 #include <ESP8266WiFi.h>
-#include <coredecls.h>  // crc32()
 #include <PolledTimeout.h>
-#include <include/WiFiState.h>  // WiFiState structure details
 #include <LittleFS.h>
 #include <Wire.h>
 #include <SoftwareSerial.h>
@@ -39,6 +37,9 @@
 #define GPIO_SET_ACCESS_POINT 14 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 #define GPIO_VIRTUAL_SERIAL_TX 12 // On Wemos D1 Mini - Pin number 12 (GPIO12)
 #define GPIO_VIRTUAL_SERIAL_RX 13 // On Wemos D1 Mini - Pin number 13 (GPIO13)
+#define VIRTUAL_SERIAL_SPEED  9600 // Serial speed for SprintIR-WF-100 sensor
+#define SPRINTIR_MAX_POLL_REPS  5 // Maximum number of atempts to read a correct value from the CO2 sensor (first 1~2 readings return 0)
+#define SPRINTIR_MIN_READ_VALUE  1 // Minimum value returned for a correct reading
 
 // Remove when deploying in production environment
 //#define DEBUG_MODE
@@ -54,8 +55,6 @@ int sprintir_co2_status = 0;
 // Temperature and humidity sensor
 SHT30 sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH); // Addr 0x45
 SHT30 sht30_2_handler(SHT30_I2C_ADDR_PIN_LOW); // Addr 0x44
-int sht30_1_status = 0;
-int sht30_2_status = 0;
 
 // WiFi Access Point configuration
 IPAddress local_IP(10,10,10,1); // FTP server address
@@ -82,31 +81,6 @@ const char* sprintir_co2_csv_header_description = "Counter;CO2Level(ppm)"; // Ad
 /** PF definitions **/
 
 /**
- * SPRINTIR-W-F-100 CO2 sensor polling mode (runs a number of readings on the sensor, returns when valid reading is detected)
- */
-int sprintirPoll(int reps){
-  int co2_ppm=0, k=0;
-  virtual_serial.begin(9600);
-  while(co2_ppm<100 && k<reps){
-      co2_ppm = czr_handler.CO2();
-      co2_ppm *= czr_handler.getPPMFactor();  // In Sprintir WF 100, the correction factor is 100
-      k++;
-    }
-  virtual_serial.end();
-  return co2_ppm;
-}
-
-/**
- * SPRINTIR-W-F-100 CO2 sensor calibration with fresh air reference
- */
-void sprintirCalibrate(){
-  virtual_serial.begin(9600);
-  czr_handler.calibrateFreshAir();
-  virtual_serial.end();
-}
-
-
-/**
  * Configures the ESP8266 as WiFi Access Point, and starts the FTP server
  */
 void setAccessPoint() {
@@ -131,7 +105,6 @@ void setAccessPoint() {
   WiFi.forceSleepBegin();
 }
 
-
 /**
  * Start LittleFS
  */
@@ -148,46 +121,19 @@ void mountLittleFS(){
 #endif // DEBUG_MODE
 }
 
-
-/**
- * Read and save sensor data on data files
- */
-void dataAcquisition() {
-  int co2_ppm = 0;
-
-  if (LittleFS.exists(sht30_1_file_path)){ // File exists
-    if(sht30_1_handler.read_single_shot() == SHT30_READ_OK){
-      appendSHT30Data(SHT30_I2C_ADDR_PIN_HIGH, sht30_1_handler.cTemp, sht30_1_handler.humidity, sht30_1_file_path); // Append sensor data
-    }
-  }
-  if (LittleFS.exists(sht30_2_file_path)){ // File exists
-    if(sht30_2_handler.read_single_shot() == SHT30_READ_OK){
-      appendSHT30Data(SHT30_I2C_ADDR_PIN_LOW, sht30_2_handler.cTemp, sht30_2_handler.humidity, sht30_2_file_path); // Append sensor data
-    }
-  }
-  if (LittleFS.exists(sprintir_co2_file_path)){ // File exists
-    co2_ppm = sprintirPoll(5);
-    if (co2_ppm >= 100){
-      appendSprintirCO2Data(co2_ppm, sprintir_co2_file_path);
-    }
-  }
-}
-
-
 /**
  * Check what sensors are connected at first boot, and create files for each sensor
  * If sensor is not present at first boot, the file is not created, and following measurements are not taken
  * This prevents polling inactive of faulty sensors
  */
 void createDataFiles(){
-  int calibration_ret_val;
   File new_file;
   if (sht30_1_handler.read_status_register() == SHT30_READ_OK){ // Check if sensor is OK
     if (!LittleFS.exists(sht30_1_file_path)){ // File does not exist
       new_file = LittleFS.open(sht30_1_file_path, "w");
       if (!new_file) {
         return; // Failed creating file
-      } 
+      }
       else{
         new_file.print(sht30_csv_header_description); // Write CSV header
         new_file.close();
@@ -206,7 +152,7 @@ void createDataFiles(){
       new_file = LittleFS.open(sht30_2_file_path, "w");
       if (!new_file) {
         return; // Failed creating file
-      } 
+      }
       else{
         new_file.print(sht30_csv_header_description); // Write CSV header
         new_file.close();
@@ -220,13 +166,13 @@ void createDataFiles(){
 #endif // DEBUG_MODE
 
   // CO2 sensor
-  if (sprintirPoll(5) >= 100){
-    sprintirCalibrate();
+  if (sprintirPoll(SPRINTIR_MAX_POLL_REPS) >= SPRINTIR_MIN_READ_VALUE){
+    sprintirCalibrate(); // At first boot, the CO2 sensor is callibrated
     if (!LittleFS.exists(sprintir_co2_file_path)){ // File does not exist
       new_file = LittleFS.open(sprintir_co2_file_path, "w");
       if (!new_file) {
         return; // Failed creating file
-      } 
+      }
       else{
         new_file.print(sprintir_co2_csv_header_description); // Write CSV header
         new_file.close();
@@ -240,6 +186,57 @@ void createDataFiles(){
 #endif // DEBUG_MODE
 }
 
+/**
+ * SPRINTIR-W-F-100 CO2 sensor polling mode (runs a number of readings on the sensor, returns when valid reading is detected)
+ */
+int sprintirPoll(int reps){
+  int co2_ppm=0, k=0;
+  czr_handler.init(); // Initialize CO2 sensor handler (Setup time is set to 1200 ms)
+  virtual_serial.begin(VIRTUAL_SERIAL_SPEED);
+  czr.setOperatingMode(CZR_POLLING); // Explicit set of Polling mode
+  while(co2_ppm<SPRINTIR_MIN_READ_VALUE && k<reps){
+      co2_ppm = czr_handler.CO2();
+      k++;
+    }
+  co2_ppm *= czr_handler.getPPMFactor();  // In Sprintir WF 100, the correction factor is 100
+  czr.setOperatingMode(CZR_COMMAND); // Explicit set of Command mode (this reduces energy use when in Sleep Mode)
+  virtual_serial.end();
+  return co2_ppm;
+}
+
+/**
+ * SPRINTIR-W-F-100 CO2 sensor calibration with fresh air reference
+ */
+void sprintirCalibrate(){
+  virtual_serial.begin(VIRTUAL_SERIAL_SPEED);
+  czr_handler.init(); // Initialize CO2 sensor handler (Setup time is set to 1200 ms)
+  czr_handler.calibrateFreshAir();
+  virtual_serial.end();
+}
+
+/**
+ * Read and save sensor data on data files
+ */
+void dataAcquisition() {
+  int co2_ppm = 0;
+
+  if (LittleFS.exists(sht30_1_file_path)){ // File exists
+    if(sht30_1_handler.read_single_shot() == SHT30_READ_OK){
+      appendSHT30Data(SHT30_I2C_ADDR_PIN_HIGH, sht30_1_handler.cTemp, sht30_1_handler.humidity, sht30_1_file_path); // Append sensor data
+    }
+  }
+  if (LittleFS.exists(sht30_2_file_path)){ // File exists
+    if(sht30_2_handler.read_single_shot() == SHT30_READ_OK){
+      appendSHT30Data(SHT30_I2C_ADDR_PIN_LOW, sht30_2_handler.cTemp, sht30_2_handler.humidity, sht30_2_file_path); // Append sensor data
+    }
+  }
+  if (LittleFS.exists(sprintir_co2_file_path)){ // File exists
+    co2_ppm = sprintirPoll(SPRINTIR_MAX_POLL_REPS);
+    if (co2_ppm >= SPRINTIR_MIN_READ_VALUE){
+      appendSprintirCO2Data(co2_ppm, sprintir_co2_file_path);
+    }
+  }
+}
 
 /**
  * Append the SHT30 data into the Data files
@@ -269,7 +266,6 @@ void appendSHT30Data(uint8_t i2c_addr, float temp, float r_hum, const char *path
 #endif // DEBUG_MODE
 }
 
-
 /**
  * Append the CO2 data into the Data file
  */
@@ -295,6 +291,7 @@ void appendSprintirCO2Data(int co2_ppm, const char *path) {
 
 void setup() {
   system_rtc_mem_read(64, &cycle_counter, 4); // Copy RTC memory value in current cycle counter
+  // When reset by GPIO RTC memeory gets wrong value, this prevents erros in first boot if done by GPIO reset
   if (cycle_counter > CYCLE_COUNTER_RST){cycle_counter = 0;}
 #ifdef DEBUG_MODE
   Serial.begin(SERIAL_SPEED);
@@ -311,13 +308,13 @@ void setup() {
   WiFi.mode(WIFI_OFF); // Must turn the modem off; using disconnect won't work
   WiFi.forceSleepBegin();
   mountLittleFS(); // Mount the file system
-  czr_handler.init(); // Initialize CO2 sensor handler
 
   if (cycle_counter == 0){ // First boot: check which sensors are present and OK
-    createDataFiles();     
-  } 
-  dataAcquisition(); // Read sensors and save data
+    createDataFiles();
+  }
 
+  dataAcquisition(); // Read sensors and save data
+  
   // Increment and save the current cycle counter value in RTC memory
   cycle_counter++;
   system_rtc_mem_write(64, &cycle_counter, 4);
@@ -336,7 +333,6 @@ void setup() {
   Serial.println(millis());
   Serial.flush();
 #endif // DEBUG_MODE
-
   ESP.deepSleep(SLEEP_TIME_MS*1000, WAKE_NO_RFCAL); // Deep Sleep - MCU reset at wakeup - GPIO16 must be connected to RST
 }
 
