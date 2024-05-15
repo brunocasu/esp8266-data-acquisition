@@ -78,25 +78,27 @@ void setup()
   display.clearDisplay();
 
   // draw many lines
-  testdrawline();
-  display.display();
-  delay(1000);
-  display.clearDisplay();
-  
+  //testdrawline();
+  //display.display();
+  //delay(1000);
+  //display.clearDisplay();
   czr.setOperatingMode(CZR_STREAMING);
+  
   uint32_t ppm = czr.getPPMFactor();
   Serial.print("  /  PPMFactor =\t");
   Serial.println(ppm);
+  
   int k=0;
-  // for echo in continuous mode.
+   // for echo in continuous mode.
   while (k<100){
-      if (sws.available()){
+     if (sws.available()){
         //Serial.print("SWS DATA: ");
         Serial.write(sws.read());
-        k++;
+       k++;
     } 
   }
   delay(1000);
+  Serial.print("START POLLING MODE");
   // set to polling explicitly.
   czr.setOperatingMode(CZR_POLLING);
   delay(1000);

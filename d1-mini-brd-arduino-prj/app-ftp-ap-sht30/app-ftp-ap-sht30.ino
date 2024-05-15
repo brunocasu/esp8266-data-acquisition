@@ -15,7 +15,7 @@
  *  Created on: Jan 25, 2024
  *      Author: Bruno Casu
  *
- *  Version 1.1 (Mar 21, 2024)
+ *  Version 1.1 (Apr 10, 2024)
  */
  
 #include <ESP8266WiFi.h>
@@ -37,7 +37,7 @@
 #define GPIO_SET_ACCESS_POINT 14 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 
 // Remove when deploying in production environment
-#define DEBUG_MODE
+//#define DEBUG_MODE
 
 #define CYCLE_COUNTER_RST 10000000  // When resetig via GPIO, RTC memory gets wrong counter value - must be reset
 unsigned long cycle_counter = 0;
@@ -63,7 +63,7 @@ FSInfo fs_info;
 // Data file configuration
 const char* sht30_1_file_path = "/sht30_addr_45_data.csv";
 const char* sht30_2_file_path = "/sht30_addr_44_data.csv";
-const char* sht30_csv_header_description = "Counter;Temperature(C);RelHumidity(RH%);ExecutionTime(ms)"; // Added at the creation of the Data file
+const char* sht30_csv_header_description = "Ctr;Temperature(C);RelHumidity(RH%)"; // Added at the creation of the Data file
 
 
 /** PF definitions **/
@@ -81,6 +81,8 @@ void setAccessPoint() {
   // Device Info
   Serial.print("\n-->SW VERSION: ");
   Serial.println(APP_VERSION);
+  Serial.print("\n-->SLEEP_TIME_MS: ");
+  Serial.println(SLEEP_TIME_MS);
   Serial.print("\n-->AP Mode - WiFi SSID (NO PASSWORD): ");
   Serial.println(ssid_AP);
   Serial.print("\n-->FTP Server IP Addr: ");
@@ -159,6 +161,8 @@ void createDataFiles(){
  * Read and save sensor data on data files
  */
 void dataAcquisition() {
+  sht30_1_handler.cTemp = 0;
+  sht30_2_handler.cTemp = 0;
   if (LittleFS.exists(sht30_1_file_path)){ // File exists
     if(sht30_1_handler.read_single_shot() == SHT30_READ_OK){
       appendSHT30Data(SHT30_I2C_ADDR_PIN_HIGH, sht30_1_handler.cTemp, sht30_1_handler.humidity, sht30_1_file_path); // Append sensor data
@@ -255,14 +259,19 @@ void setup() {
   }
 
   int exe_time = millis();
-  appendExecutionTime(exe_time, sht30_1_file_path);
-  appendExecutionTime(exe_time, sht30_2_file_path);
+  //if (sht30_1_handler.cTemp>0){appendExecutionTime(exe_time, sht30_1_file_path);}
+  //if (sht30_2_handler.cTemp>0)appendExecutionTime(exe_time, sht30_2_file_path);
 
 #ifdef DEBUG_MODE
   Serial.print("\n-->Execution time (ms): ");
   Serial.print(exe_time);
   Serial.print(F("\n-->Device will deep Sleep for (ms): "));
   Serial.println(SLEEP_TIME_MS);
+  LittleFS.info(fs_info);
+  Serial.print("-->LittleFS End of Execution\nTotal FS Size (kB):");
+  Serial.println(fs_info.totalBytes*0.001);
+  Serial.print("Used (kB): ");
+  Serial.println(fs_info.usedBytes*0.001);
   Serial.flush();
 #endif // DEBUG_MODE
   ESP.deepSleep(SLEEP_TIME_MS*1000, WAKE_NO_RFCAL); // Deep Sleep - MCU reset at wakeup - GPIO16 must be connected to RST
