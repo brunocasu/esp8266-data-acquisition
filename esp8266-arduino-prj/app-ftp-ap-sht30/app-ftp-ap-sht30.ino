@@ -24,7 +24,6 @@
 #include <Wire.h>
 #include <SoftwareSerial.h>
 #include <SimpleFTPServer.h> // Replacing <ESP8266FtpServer.h>
-#include <cozir.h>
 #include <sht30.h>
 
 #define SERIAL_SPEED  115200
@@ -39,7 +38,7 @@
 // Remove when deploying in production environment
 //#define DEBUG_MODE
 
-#define CYCLE_COUNTER_RST 10000000  // When resetig via GPIO, RTC memory gets wrong counter value - must be reset
+#define CYCLE_COUNTER_RST 10000000
 unsigned long cycle_counter = 0;
 
 // Temperature and humidity sensor
@@ -107,7 +106,6 @@ void printDeviceInfo(){
   Serial.println(user_FTP);
   Serial.print("FTP_PWD: ");
   Serial.println(pwd_FTP);
-  Serial.println("\n-->Waiting for connections...");
   
   Serial.flush();
 }
@@ -165,8 +163,6 @@ void createDataFiles(){
  * Read and save sensor data on data files
  */
 void dataAcquisition() {
-  sht30_1_handler.cTemp = 0;
-  sht30_2_handler.cTemp = 0;
   if (LittleFS.exists(sht30_1_file_path)){ // File exists
     if(sht30_1_handler.read_single_shot() == SHT30_READ_OK){
       appendSHT30Data(SHT30_I2C_ADDR_PIN_HIGH, sht30_1_handler.cTemp, sht30_1_handler.humidity, sht30_1_file_path); // Append sensor data
@@ -215,8 +211,7 @@ void appendSHT30Data(uint8_t i2c_addr, float temp, float r_hum, const char *path
 
 void setup() {
   system_rtc_mem_read(64, &cycle_counter, 4); // Copy RTC memory value in current cycle counter
-  // When reset by GPIO RTC memeory gets wrong value, this prevents errors in first boot if done by GPIO reset
-  if (cycle_counter > CYCLE_COUNTER_RST){cycle_counter = 0;}
+  if (cycle_counter > CYCLE_COUNTER_RST){cycle_counter = 0;} // This prevents errors in first boot if done by GPIO reset (RTC memeory gets wrong value)
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH); // LED off
   pinMode(GPIO_SET_ACCESS_POINT, INPUT_PULLUP); // Set Access point pin
@@ -230,8 +225,7 @@ void setup() {
 #ifdef DEBUG_MODE
   printDeviceInfo();
 #endif // DEBUG_MODE  
-for(int k=0;k<10000;k++){
-  //delay(1000);
+
   // Setup data files and read the sensors
   createDataFiles();
   dataAcquisition();
@@ -246,8 +240,7 @@ for(int k=0;k<10000;k++){
     system_rtc_mem_write(64, &cycle_counter, 4); // Reset the cycle counter
     setAccessPoint();
   }
-}
-errorHandler();
+
   // Sleep untile next cycle
   ESP.deepSleep(SLEEP_TIME_MS*1000, WAKE_NO_RFCAL); // Deep Sleep - MCU reset at wakeup - GPIO16 must be connected to RST
 }

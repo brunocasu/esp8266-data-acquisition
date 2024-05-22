@@ -1,5 +1,5 @@
 /*
- * app-ftp-ap-sht30-hp3038.ino
+ * app-ftp-ap-sht30-hp303b-cozir.ino
  *
  * This program is free software: you can redistribute it and/or modify it under the terms of the
  * GNU General Public License as published by the Free Software Foundation, either version 3 of
@@ -12,7 +12,7 @@
  * You should have received a copy of the GNU General Public License along with this program. If not,
  * see <https://www.gnu.org/licenses/>.
  *
- *  Created on: May 16, 2024
+ *  Created on: May 17, 2024
  *      Author: Bruno Casu
  *
  *  Version 1.0 (May 16, 2024)
@@ -24,12 +24,12 @@
 #include <Wire.h>
 #include <SoftwareSerial.h>
 #include <SimpleFTPServer.h> // Replacing <ESP8266FtpServer.h>
-#include <cozir.h>
 #include <sht30.h>
 #include <LOLIN_HP303B.h>
+#include <cozir.h>
 
 #define SERIAL_SPEED  115200
-#define APP_VERSION "app-ftp-ap-sht30-hp3038_v1.0"
+#define APP_VERSION "app-ftp-ap-sht30-hp303b-cozir_v1.0"
 
 // Defines for the data aquisition system
 #define SHT30_I2C_ADDR_PIN_HIGH 0x45  // Jumper NOT connected
@@ -38,6 +38,13 @@
 #define HP303B_OVERSAMPLING_RATE  2  // From 1 to 7 (7 is  the highest oversampling rate)
 #define SLEEP_TIME_MS 1800000  // Interval between measurements in ms
 #define GPIO_SET_ACCESS_POINT 14 // On Wemos D1 Mini - Pin number 14 (GPIO14)
+// CO2 sensor
+#define GPIO_VIRTUAL_SERIAL_TX  12 // On Wemos D1 Mini - Pin number 12 (GPIO12)
+#define GPIO_VIRTUAL_SERIAL_RX  13 // On Wemos D1 Mini - Pin number 13 (GPIO13)
+#define VIRTUAL_SERIAL_SPEED    9600 // Serial speed for SprintIR-WF-100 sensor
+#define SPRINTIR_MAX_POLL_REPS  5 // Maximum number of atempts to read a correct value from the CO2 sensor (first 1~2 readings return 0)
+#define SPRINTIR_MIN_READ_VALUE 300 // Minimum value returned for a correct reading
+#define SPRINTIR_PPM_FACTOR     100
 
 // Remove when deploying in production environment
 #define DEBUG_MODE
@@ -50,6 +57,10 @@ SHT30 sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH); // Addr 0x45
 SHT30 sht30_2_handler(SHT30_I2C_ADDR_PIN_LOW); // Addr 0x44
 // Temperature and pressure sensor
 LOLIN_HP303B hp303b_handler;
+// CO2 sensor
+SoftwareSerial virtual_serial(GPIO_VIRTUAL_SERIAL_RX, GPIO_VIRTUAL_SERIAL_TX);
+COZIR czr_handler(&virtual_serial);
+int sprintir_co2_status = 0;
 
 // WiFi Access Point configuration
 IPAddress local_IP(10,10,10,1); // FTP server address
@@ -69,8 +80,10 @@ FSInfo fs_info;
 const char* sht30_1_file_path = "/sht30_addr_45_data.csv";
 const char* sht30_2_file_path = "/sht30_addr_44_data.csv";
 const char* hp303b_file_path = "/hp303b_addr_77_data.csv";
+const char* sprintir_co2_file_path = "/sprintir_co2_data.csv";
 const char* sht30_csv_header_description = "Ctr;Temperature(C);RelHumidity(RH%);ExeTime(ms)"; // Added at the creation of the Data file
 const char* hp303b_csv_header_description = "Ctr;Temperature(C);Pressure(Pa);ExeTime(ms)"; // Added at the creation of the Data file
+const char* sprintir_co2_csv_header_description = "Ctr;CO2Level(ppm);ExeTime(ms)"; // Added at the creation of the Data file
 
 
 /** PF definitions **/
@@ -114,7 +127,7 @@ void printDeviceInfo(){
   Serial.println(user_FTP);
   Serial.print("FTP_PWD: ");
   Serial.println(pwd_FTP);
-
+  
   Serial.flush();
 }
 
@@ -175,6 +188,35 @@ void createDataFiles(){
       new_file.close();
     }
   }
+}
+
+
+/**
+ * SPRINTIR-W-F-100 CO2 sensor polling mode (runs a number of readings on the sensor, returns when valid reading is detected)
+ */
+int sprintirPoll(int reps){
+  int co2_ppm=0, k=0;
+  virtual_serial.begin(VIRTUAL_SERIAL_SPEED);
+  czr_handler.init(); // Initialize CO2 sensor handler (Setup time is set to 1200 ms)
+  // set to polling explicitly.
+  while(1){
+    czr_handler.setOperatingMode(CZR_STREAMING);
+    delay(1000);
+    czr_handler.setOperatingMode(CZR_POLLING);
+    delay(1000);
+    co2_ppm = 0;
+    while(co2_ppm<SPRINTIR_MIN_READ_VALUE){
+      co2_ppm = czr_handler.CO2();
+      co2_ppm *= SPRINTIR_PPM_FACTOR;
+      Serial.print("CO2 =\t");
+      Serial.println(co2_ppm);
+      delay(100);
+    }
+    
+  }
+  //co2_ppm *= czr_handler.getPPMFactor();  // In Sprintir WF 100, the correction factor is 100
+  //czr_handler.setOperatingMode(CZR_COMMAND); // Explicit set of Command mode (this reduces energy use when in Sleep Mode)
+  return co2_ppm;
 }
 
 /**
@@ -293,6 +335,8 @@ void setup() {
   // Setup data files and read the sensors
   createDataFiles();
   dataAcquisition();
+  
+  sprintirPoll(500);
   
   // Increment and save the current cycle counter value in RTC memory
   cycle_counter++;
