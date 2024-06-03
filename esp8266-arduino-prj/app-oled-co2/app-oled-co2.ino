@@ -90,31 +90,6 @@ void setup()
   // Clear the buffer.
   display.clearDisplay();
 
-  // draw many lines
-  //testdrawline();
-  //display.display();
-  //delay(1000);
-  //display.clearDisplay();
-  czr.setOperatingMode(CZR_STREAMING);
-  
-  uint32_t ppm = czr.getPPMFactor();
-  Serial.print("  /  PPMFactor =\t");
-  Serial.println(ppm);
-  
-  int k=0;
-   // for echo in continuous mode.
-  while (k<100){
-     if (sws.available()){
-        //Serial.print("SWS DATA: ");
-        Serial.write(sws.read());
-       k++;
-    } 
-  }
-  delay(1000);
-  Serial.print("START POLLING MODE");
-  // set to polling explicitly.
-  czr.setOperatingMode(CZR_POLLING);
-  delay(1000);
   hp303b_handler.begin();
 
 }
@@ -144,11 +119,13 @@ void loop()
   static float hum;
   static int pres;
   static float co2;
+
+  float read_co2 = (float)readCozirStream();
+  Serial.println(read_co2);
+  if(read_co2>0){co2 = read_co2/100;}
+  Serial.print(co2);
   
-  float read_co2 = czr.CO2();
-  if (read_co2 > 0) {co2 = read_co2;}
-  
-  delay(1000);
+  delay(500);
   if(sht30_2_handler.read_single_shot() == SHT30_READ_OK){
     temp = sht30_2_handler.cTemp;
     hum = sht30_2_handler.humidity;
@@ -165,7 +142,6 @@ void loop()
   display.setTextColor(WHITE);
   display.setCursor(0,0);
 
-  co2 /= 100;  // most of time PPM = one.
   int size_arr = float_to_char_array(co2, co2_arr);
   for (int i=0;i<size_arr;i++){
     testdrawchar(co2_arr[i]);
@@ -204,9 +180,68 @@ void loop()
   
   
   //display.clearDisplay();
-  delay(5000);
+  delay(2000);
   loop_ctr++;
 }
+
+int parseSensorValue(String input) {
+  // Find the position of 'Z' in the input string
+  int zPos = input.indexOf('Z');
+  
+  // If 'Z' is found
+  if (zPos != -1) {
+    // Extract the substring starting from 'Z' position
+    String numberString = input.substring(zPos + 2); // Skip 'Z ' to get the number part
+    
+    // Trim any leading or trailing whitespace
+    numberString.trim();
+    
+    // Convert the string to an integer
+    int sensorValue = numberString.toInt();
+    
+    // Return the parsed integer value
+    return sensorValue;
+  }
+  
+  // If 'Z' is not found or parsing fails, return a default value or handle the error appropriately
+  return -1;
+}
+
+int readCozirStream(void){
+  czr.setOperatingMode(CZR_STREAMING);
+  String result = "";
+  char currentChar;
+  
+  // Wait for 'Z' character
+  while (sws.available()) {
+    currentChar = sws.read();
+    if (currentChar == 'Z') {
+      result += currentChar;
+      break;
+    }
+  }
+  
+  // If 'Z' character detected, read the next 6 characters
+  if (currentChar == 'Z') {
+    for (int i = 0; i < 6; i++) {
+      while (!sws.available()); // Wait until data available
+      currentChar = sws.read();
+      result += currentChar;
+    }
+  }
+  
+  Serial.println(result);
+  int sensorValue = parseSensorValue(result);
+  // Print the parsed sensor value
+  if(sensorValue > 0){
+    return sensorValue;
+  }
+  else {
+    return 0;
+  }
+  
+}
+
 
 int float_to_char_array(float value, char *output) {
     int chars_written;
@@ -233,6 +268,11 @@ int int_to_char_array(int value, char *output) {
     }
     return chars_written; // Return the number of characters written
 }
+
+//float calculate_ppmv(float T_t, float P_t, float RH_t){
+//  float ews_t; // 
+  
+//}
 
 
 void testdrawchar(char input_char) {
