@@ -28,7 +28,7 @@
 #define APP_VERSION "esp-m2-app-ms5803-14_v1.0"
 
 // Defines for the data aquisition system
-#define SLEEP_TIME_MS 7200000  // Interval between measurements in ms
+#define SLEEP_TIME_MS 1800000  // Interval between measurements in ms
 #define GPIO_SET_ACCESS_POINT 14 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 
 // MS5803_14 defines
@@ -61,7 +61,7 @@ unsigned long cycle_counter = 0;
 IPAddress local_IP(10,10,10,1); // FTP server address
 IPAddress gateway(10,10,10,1);
 IPAddress subnet_mask(255,255,255,0);
-const char* ssid_AP = "V00-AP-ESPM2"; // No password set
+const char* ssid_AP = "V32-AP-ESPM2"; // No password set
 
 // FTP server access configuration
 const char* user_FTP = "espm2";
@@ -72,9 +72,9 @@ FtpServer ftpSrv; // Handler
 FSInfo fs_info;
 
 // Data file configuration
-const char* coef_file_path = "/V00_coef.txt";
+const char* coef_file_path = "/V32_coef.txt";
 const char* coef_header_description = "C0;C1;C2;C3;C4;C5;C6;CRC;"; // Added at the creation of the Data file
-const char* data_file_path = "/V00_raw_data.csv";
+const char* data_file_path = "/V32_raw_data.csv";
 const char* data_csv_header_description = "Ctr;RawPressure;RawTemperature"; // Added at the creation of the Data file
 
 
@@ -189,7 +189,6 @@ void dataAcquisition() {
   int p_ret, t_ret;
   unsigned long raw_pressure = 0;
   unsigned long raw_temperature = 0;
-
   if (LittleFS.exists(data_file_path)){ // File exists
     p_ret = ms5803_read_raw_pressure(&raw_pressure);
     t_ret = ms5803_read_raw_temperature(&raw_temperature);

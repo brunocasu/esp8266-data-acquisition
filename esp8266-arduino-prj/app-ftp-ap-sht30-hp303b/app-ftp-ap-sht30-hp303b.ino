@@ -1,5 +1,5 @@
 /*
- * app-ftp-ap-sht30-hp3038.ino
+ * app-ftp-ap-sht30-hp303b.ino
  *
  * This program is free software: you can redistribute it and/or modify it under the terms of the
  * GNU General Public License as published by the Free Software Foundation, either version 3 of
@@ -15,7 +15,7 @@
  *  Created on: May 16, 2024
  *      Author: Bruno Casu
  *
- *  Version 1.0 (May 16, 2024)
+ *  Version 2.0 (July 9, 2024)
  */
  
 #include <ESP8266WiFi.h>
@@ -27,9 +27,10 @@
 #include <cozir.h>
 #include <sht30.h>
 #include <LOLIN_HP303B.h>
+#include <math.h>
 
 #define SERIAL_SPEED  115200
-#define APP_VERSION "app-ftp-ap-sht30-hp3038_v1.0"
+#define APP_VERSION "app-ftp-ap-sht30-hp303b_v2.0"
 
 // Defines for the data aquisition system
 #define SHT30_I2C_ADDR_PIN_HIGH 0x45  // Jumper NOT connected
@@ -55,7 +56,7 @@ LOLIN_HP303B hp303b_handler;
 IPAddress local_IP(10,10,10,1); // FTP server address
 IPAddress gateway(10,10,10,1);
 IPAddress subnet_mask(255,255,255,0);
-const char* ssid_AP = "AP-ESP8266"; // No password set
+const char* ssid_AP = "C01-AP-ESP8266"; // No password set
 
 // FTP server access configuration
 const char* user_FTP = "esp8266";
@@ -65,13 +66,9 @@ FtpServer ftpSrv; // Handler
 // LittleFs info
 FSInfo fs_info;
 
-// Data file configuration
-const char* sht30_1_file_path = "/sht30_addr_45_data.csv";
-const char* sht30_2_file_path = "/sht30_addr_44_data.csv";
-const char* hp303b_file_path = "/hp303b_addr_77_data.csv";
-const char* sht30_csv_header_description = "Ctr;Temperature(C);RelHumidity(RH%);ExeTime(ms)"; // Added at the creation of the Data file
-const char* hp303b_csv_header_description = "Ctr;Temperature(C);Pressure(Pa);ExeTime(ms)"; // Added at the creation of the Data file
-
+const char* data_file_path = "/C01_data.csv";
+// Added at the creation of the Data file
+const char* csv_header_description = "CTR;HP303B_T(C);HP303B_P(Pa);SHT30_45_T(C);SHT30_45_RH(%);SHT30_44_T(C);SHT30_44_RH(%);PPMV;DP(C);ABS_HUM(g/m3);EX_t(ms)"; 
 
 /** PF definitions **/
 
@@ -93,7 +90,7 @@ void errorHandler(){
 void printDeviceInfo(){
   LittleFS.info(fs_info);
   Serial.begin(SERIAL_SPEED);
-  delay(500);
+  delay(50);
   Serial.print("\n\n-->SW VERSION: ");
   Serial.println(APP_VERSION);
   Serial.print(F("Cycle counter = "));
@@ -114,7 +111,6 @@ void printDeviceInfo(){
   Serial.println(user_FTP);
   Serial.print("FTP_PWD: ");
   Serial.println(pwd_FTP);
-
   Serial.flush();
 }
 
@@ -145,131 +141,126 @@ void setAccessPoint() {
 void createDataFiles(){
   File new_file;
   // Create Data files, if they do not exist
-  if (!LittleFS.exists(sht30_1_file_path)){ // File does not exist
-    new_file = LittleFS.open(sht30_1_file_path, "w");
+  if (!LittleFS.exists(data_file_path)){ // File does not exist
+    new_file = LittleFS.open(data_file_path, "w");
     if (!new_file) {
       errorHandler(); // Failed creating file
     }
     else{
-      new_file.print(sht30_csv_header_description); // Write CSV header
-      new_file.close();
-    }
-  }
-  if (!LittleFS.exists(sht30_2_file_path)){ // File does not exist
-    new_file = LittleFS.open(sht30_2_file_path, "w");
-    if (!new_file) {
-      errorHandler(); // Failed creating file
-    }
-    else{
-      new_file.print(sht30_csv_header_description); // Write CSV header
-      new_file.close();
-    }
-  }
-    if (!LittleFS.exists(hp303b_file_path)){ // File does not exist
-    new_file = LittleFS.open(hp303b_file_path, "w");
-    if (!new_file) {
-      errorHandler(); // Failed creating file
-    }
-    else{
-      new_file.print(hp303b_csv_header_description); // Write CSV header
+      new_file.print(csv_header_description); // Write CSV header
       new_file.close();
     }
   }
 }
 
 /**
- * Read and save sensor data on data files
+ * Calculate the water vapor content, absolute humidity and dew point based on T, P and RH measurements
  */
-void dataAcquisition() {
-  double hp303b_temp;
-  int32_t temp; // not used (integer value of temeprature reading)
-  int32_t hp303b_pres;
+void calculatePPMV(float *arr, float T, int32_t P_Pa, float RH){
+    float P = (float) P_Pa/100; // Measured Pressure in hPa (mbar)
+    float Pws=0; // Water vapor saturation pressure (hPa)
+    float Pw=0; // Water vapor pressure (hPa)
+    float ppmv=0; // Water vapor content Volume/Volume (ppmv)(wet)
+    float dew_point=0; // Deg Celsius
+    float abs_hum=0; // g/m3
+    float A=6.116441, m=7.591386, Tn=240.7263, C=2.16679; // Constants from Vaisala
+    if (P!=0 && RH!=0){
+      Pws = (float) A * pow(10, ((m * T) / (Tn + T))); // Equations from Vaisala
+      //Pws = (float) pC * 6.1121 * exp((pA * T) / (pB + T));
+      Pw = (float) Pws*(RH/100);
+      ppmv = (float) 1000000 * (Pw/P);
+      float div = (float) log10(Pw/A);
+      dew_point = (float) Tn / ((m/div)-1);
+      abs_hum = (float) C * ((Pw*100)/(T+273.15));
+      arr[0] = Pws;
+      arr[1] = Pw;
+      arr[2] = ppmv;
+      arr[3] = dew_point;
+      arr[4] = abs_hum;
+    }
+#ifdef DEBUG_MODE
+    Serial.println("\n-->Sensor data:");
+    Serial.print("HP303B_T(C): ");
+    Serial.println(T);
+    Serial.print("HP303B_P(hPa): ");
+    Serial.println(P);
+    Serial.print("HP303B_P(Pa): ");
+    Serial.println(P_Pa);
+    Serial.print("SHT30_RH(%): ");
+    Serial.println(RH);
+    Serial.print("Pws(hPa): ");
+    Serial.println(Pws, 4);
+    Serial.print("Pw(hPa): ");
+    Serial.println(Pw, 4);
+    Serial.print("PPMV: ");
+    Serial.println(ppmv, 0);
+    Serial.print("Dew point(C): ");
+    Serial.println(dew_point);
+    Serial.print("Abs Humidity (g/m3): ");
+    Serial.println(abs_hum);
+#endif // DEBUG_MODE
+}
 
-  if (LittleFS.exists(hp303b_file_path)){ // File exists
+/**
+ * Read and save sensor data on data files separetelly - deprecated
+ */
+void dataAcquisition(){
+  double hp_T=0;
+  int32_t temp; // not used (integer value of temeprature reading)
+  int32_t hp_P=0;
+  float sht_RH=0;
+  float arr[5]={0}; // return values of the calculatePPMV func: [0]=Pws, [1]=Pw, [2]=ppmn, [3]=dew_point, [4]=abs_hum
+  if (LittleFS.exists(data_file_path)){ // File exists
+    File data_file = LittleFS.open(data_file_path, "a");
+    if (!data_file) {
+      return;
+    }
+    data_file.print("\n"); // Add new line every measurement
+    data_file.print(cycle_counter); // Add cycle counter value
+    data_file.print(";");
+    // Try to read HP303B
     hp303b_handler.begin();
     if(hp303b_handler.measureTempOnce(temp, HP303B_OVERSAMPLING_RATE) == 0){ // Temperature reading OK
-      if(hp303b_handler.measurePressureOnce(hp303b_pres, HP303B_OVERSAMPLING_RATE) == 0){ // Pressure reading OK
-        hp303b_temp = hp303b_handler.returnDoublePrecisionTemp(); // Adapted function to retrieve decimal precision temperature
-        appendHP303BData(HP303B_I2C_ADDR_PIN_HIGH, hp303b_temp, hp303b_pres, hp303b_file_path); // Append sensor data
-      }
+      hp_T = hp303b_handler.returnDoublePrecisionTemp();
+      data_file.print(hp_T, 2);
     }
-  }
-  if (LittleFS.exists(sht30_1_file_path)){ // File exists
+    data_file.print(";");
+    if(hp303b_handler.measurePressureOnce(hp_P, HP303B_OVERSAMPLING_RATE) == 0){ // Pressure reading OK
+      data_file.print(hp_P);
+    }
+    data_file.print(";");
+    // Try to read SHT30 addr 45
     if(sht30_1_handler.read_single_shot() == SHT30_READ_OK){
-      appendSHT30Data(SHT30_I2C_ADDR_PIN_HIGH, sht30_1_handler.cTemp, sht30_1_handler.humidity, sht30_1_file_path); // Append sensor data
+      sht_RH = (float) sht30_1_handler.humidity; // To calculate the PPMV levels, the RH from SHT30 Addr 45 is used by default
+      data_file.print(sht30_1_handler.cTemp, 2);
+      data_file.print(";");
+      data_file.print(sht30_1_handler.humidity, 2);
+      data_file.print(";");
     }
-  }
-  if (LittleFS.exists(sht30_2_file_path)){ // File exists
+    else{data_file.print(";;");} // Empty data
+    // Try to read SHT30 addr 44
     if(sht30_2_handler.read_single_shot() == SHT30_READ_OK){
-      appendSHT30Data(SHT30_I2C_ADDR_PIN_LOW, sht30_2_handler.cTemp, sht30_2_handler.humidity, sht30_2_file_path); // Append sensor data
+      data_file.print(sht30_2_handler.cTemp, 2);
+      data_file.print(";");
+      data_file.print(sht30_2_handler.humidity, 2);
+      data_file.print(";");
     }
+    else{data_file.print(";;");} // Empty data
+    // Calculate and write PPMV and DP values
+    calculatePPMV(arr, hp_T, hp_P, sht_RH);
+    if (arr[0]!=0 && arr[1]!=0){
+      data_file.print(arr[2], 0); // ppmv
+      data_file.print(";");
+      data_file.print(arr[3], 2); // dew_point
+      data_file.print(";");
+      data_file.print(arr[4], 2); // abs_hum
+      data_file.print(";");
+    }
+    else{data_file.print(";;;");} // Empty data
+    data_file.print(millis());
+    data_file.flush(); // Ensure writting before returning
+    data_file.close();
   }
-}
-
-/**
- * Append the SHT30 data into the Data files
- */
-void appendSHT30Data(uint8_t i2c_addr, float temp, float r_hum, const char *path) {
-  int exe_time = millis();
-  File data_file = LittleFS.open(path, "a");
-    if (!data_file) {
-      return;
-    }
-    else {
-      data_file.print("\n");
-      data_file.print(cycle_counter);
-      data_file.print(";");
-      data_file.print(temp, 2);
-      data_file.print(";");
-      data_file.print(r_hum, 2);
-      data_file.print(";");
-      data_file.print(exe_time);
-      data_file.flush(); // Ensure writting before returning
-    }
-    data_file.close();
-#ifdef DEBUG_MODE
-    Serial.print("\n-->SHT30 ");
-    Serial.print(i2c_addr, HEX);
-    Serial.print(" T(C): ");
-    Serial.print(temp);
-    Serial.print(" RH(RH%): ");
-    Serial.print(r_hum);
-    Serial.print(" ExeTime(ms): ");
-    Serial.print(exe_time);
-#endif // DEBUG_MODE
-}
-
-/**
- * Append the HP303B data into the Data files
- */
-void appendHP303BData(uint8_t i2c_addr, double temp, int32_t pres, const char *path) {
-  int exe_time = millis();
-  File data_file = LittleFS.open(path, "a");
-    if (!data_file) {
-      return;
-    }
-    else {
-      data_file.print("\n");
-      data_file.print(cycle_counter);
-      data_file.print(";");
-      data_file.print(temp, 2);
-      data_file.print(";");
-      data_file.print(pres);
-      data_file.print(";");
-      data_file.print(exe_time);
-      data_file.flush(); // Ensure writting before returning
-    }
-    data_file.close();
-#ifdef DEBUG_MODE
-    Serial.print("\n-->HP303B ");
-    Serial.print(i2c_addr, HEX);
-    Serial.print(" T(C): ");
-    Serial.print(temp);
-    Serial.print(" P(Pa): ");
-    Serial.print(pres);
-    Serial.print(" ExeTime(ms): ");
-    Serial.print(exe_time);
-#endif // DEBUG_MODE
 }
 
 
