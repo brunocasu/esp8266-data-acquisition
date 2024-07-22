@@ -1,10 +1,38 @@
-#include <FS.h>
-#include <LittleFS.h>
-#include <time.h>
+/*
+ * app-fast-reading.ino
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of the
+ * GNU General Public License as published by the Free Software Foundation, either version 3 of
+ * the License, or any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
+ * even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+ * Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with this program. If not,
+ * see <https://www.gnu.org/licenses/>.
+ *
+ *  Created on: June 04, 2024
+ *      Author: Bruno Casu
+ *
+ *  Version 1.0 (July 17, 2024)
+ */
+ 
 #include <ESP8266WiFi.h>
-#include <Wire.h>
 #include <PolledTimeout.h>
+#include <LittleFS.h>
+#include <Wire.h>
+#include <SimpleFTPServer.h> // Replacing <ESP8266FtpServer.h>
 
+#define SERIAL_SPEED  115200
+#define APP_VERSION "app-fast-reading_v1.0"
+
+// Defines for the data aquisition system
+// #define SLEEP_TIME_MS 1800000  // Removed
+#define DATA_BUFF_LEN   200
+#define GPIO_SET_ACCESS_POINT 14 // On Wemos D1 Mini - Pin number 14 (GPIO14)
+
+// MS5803_14 defines
 #define MS5803_CMD_OK 0
 #define MS5803_CMD_ERROR -1
 #define GPIO_2_VCC 2
@@ -14,7 +42,7 @@
 // I2C Pins
 #define I2C_SDA_PIN 4
 #define I2C_SCL_PIN 5
-// I2C Address
+// I2C Addresses
 const int16_t I2C_CONTROLLER_ADDR = 0x42;
 const int16_t MS5803_I2C_DEVICE_ADDR = 0x77;
 // MS5803 Commands
@@ -24,17 +52,182 @@ const uint8_t CMD_CONVT = 0x50;
 const uint8_t CMD_RDADC = 0x00;
 const uint8_t CMD_RDROM = 0xA0;
 
-// Data file configuration
-const char* data_file_path = "/sensor_data.txt";
+// Remove when deploying in production environment
+//#define DEBUG_MODE
 
+// #define CYCLE_COUNTER_RST 10000000
+unsigned long cycle_counter = 0;
+
+// WiFi Access Point configuration
+IPAddress local_IP(10,10,10,1); // FTP server address
+IPAddress gateway(10,10,10,1);
+IPAddress subnet_mask(255,255,255,0);
+const char* ssid_AP = "F01-AP-ESPM2"; // No password set
+
+// FTP server access configuration
+const char* user_FTP = "espm2";
+const char* pwd_FTP = "espm2";
+FtpServer ftpSrv; // Handler
+
+// LittleFs info
+FSInfo fs_info;
+
+// Data file configuration
+const char* coef_file_path = "/F01_coef.txt";
+const char* coef_header_description = "C0;C1;C2;C3;C4;C5;C6;CRC;"; // Added at the creation of the Data file
+const char* data_file_path = "/F01_raw_data.csv";
+const char* data_csv_header_description = "Ctr;RawPressure;RawTemperature;Time(ms)"; // Added at the creation of the Data file
+
+
+/** PF definitions **/
+
+/**
+ * Error handler function
+ */
 void errorHandler(){
-  Serial.println("Error Handler");
-  while(1){delay(100);}
+  //while(1){
+  //  delay(100);
+  //}
 }
 
 /**
- * 
- * 
+ * Serial print the device configuration and file system info
+ */
+void printDeviceInfo(){
+  LittleFS.info(fs_info);
+  Serial.begin(SERIAL_SPEED);
+  delay(50);
+  Serial.print("\n\n-->SW VERSION: ");
+  Serial.println(APP_VERSION);
+  Serial.print(F("Cycle counter = "));
+  Serial.println(cycle_counter);
+  Serial.print("\n-->SLEEP_TIME_MS: ");
+  // FS info
+  Serial.print("-->LittleFS Mount OK\nTotal FS Size (kB):");
+  Serial.println(fs_info.totalBytes*0.001);
+  Serial.print("Used (kB): ");
+  Serial.println(fs_info.usedBytes*0.001);
+  // FTP-AP info
+  Serial.print("\n-->AP Mode - WiFi SSID (NO PASSWORD): ");
+  Serial.println(ssid_AP);
+  Serial.print("\n-->FTP Server IP Addr: ");
+  Serial.println(WiFi.softAPIP());
+  Serial.print("Plain FTP Connection (insecure)\nFTP_USR: ");
+  Serial.println(user_FTP);
+  Serial.print("FTP_PWD: ");
+  Serial.println(pwd_FTP);
+
+  Serial.flush();
+}
+
+/**
+ * Configures the ESP8266 as WiFi Access Point, and starts the FTP server
+ */
+void setAccessPoint() {
+  // Configure WiFi Access point
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid_AP); // No password for connecting
+  WiFi.softAPConfig(local_IP, gateway, subnet_mask);
+  printDeviceInfo();
+  // Start FTP server
+  ftpSrv.begin(user_FTP, pwd_FTP);
+  ftpSrv.setLocalIp(WiFi.softAPIP()); // Must setLocalIP as the same as the one in softAPConfig()
+  while (digitalRead(GPIO_SET_ACCESS_POINT) == LOW) {
+    ftpSrv.handleFTP();
+    delay(10);
+  }
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  WiFi.forceSleepBegin();
+}
+
+/**
+ * Create data files for each sensor
+ */
+void createDataFiles(){
+  File new_file;
+  uint16_t coef_buff[8];
+  // Create Data files, if they do not exist
+  if (!LittleFS.exists(coef_file_path)){ // File does not exist
+    new_file = LittleFS.open(coef_file_path, "w");
+    if (!new_file) {
+      errorHandler(); // Failed creating file
+    }
+    else{
+      if(ms5803_read_coefficients(coef_buff) != MS5803_CMD_OK){ // Read 8 coefficients
+        errorHandler();
+      }
+      else{
+        new_file.print(coef_header_description); // Write header
+        new_file.print("\n");
+        for(int k=0;k<8;k++){ // Write coefficients
+          new_file.print(coef_buff[k]);
+          new_file.print(";");
+        }
+        new_file.flush(); // Ensure writting before returning
+        new_file.close();
+      }
+    }
+  }
+  if (!LittleFS.exists(data_file_path)){ // File does not exist
+    new_file = LittleFS.open(data_file_path, "w");
+    if (!new_file) {
+      errorHandler(); // Failed creating file
+    }
+    else{
+      new_file.print(data_csv_header_description); // Write CSV header
+      new_file.flush(); // Ensure writting before returning
+      new_file.close();
+    }
+  }
+}
+
+/**
+ * Read and save sensor data on data files
+ */
+int dataAcquisition(unsigned long *buff) {
+  int p_ret, t_ret;
+  //unsigned long raw_pressure = 0;
+  //unsigned long raw_temperature = 0;
+  if (LittleFS.exists(data_file_path)){ // File exists
+    p_ret = ms5803_read_raw_pressure(&buff[0]);
+    t_ret = ms5803_read_raw_temperature(&buff[1]);
+    if(p_ret == MS5803_CMD_OK && t_ret == MS5803_CMD_OK){ // Readings OK
+      return 0;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Append the sensor data into the Data files
+ * buff_len is the amount of points to write on the data file
+ */
+void appendData(unsigned long *raw_pres, unsigned long *raw_temp, int *exe_time, int buff_len, const char *path) {
+  File data_file = LittleFS.open(path, "a");
+    if (!data_file) {
+      return;
+    }
+    else {
+      for (int i=0; i<buff_len; i++){
+        data_file.print("\n");
+        data_file.print(i);
+        data_file.print(";");
+        data_file.print(raw_pres[i]);
+        data_file.print(";");
+        data_file.print(raw_temp[i]);
+        data_file.print(";");
+        data_file.print(exe_time[i]);
+      }
+      data_file.flush(); // Ensure writting before returning
+    }
+    data_file.close();
+}
+
+// MS5803_14 Sensor functions
+/**
+ * Send I2C command
+ * Return 0 if Tx OK, -1 if Error
  */
 int ms5803_send_cmd(uint8_t cmd){
   Wire.beginTransmission(MS5803_I2C_DEVICE_ADDR);
@@ -111,14 +304,14 @@ int ms5803_read_raw_pressure(unsigned long *raw_pressure){
   if (ms5803_send_cmd(CMD_CONVP) != MS5803_CMD_OK){
     return -1;
   }
-  
+
   delay(3); // Delay for conversion
-  
+
   // Send read ADC command
   if (ms5803_send_cmd(CMD_RDADC) != MS5803_CMD_OK){
     return -1;
   }
-  
+
   Wire.requestFrom(MS5803_I2C_DEVICE_ADDR, 3);
   delay(1);
   n = 0;
@@ -148,14 +341,14 @@ int ms5803_read_raw_temperature(unsigned long *raw_temperature){
   if (ms5803_send_cmd(CMD_CONVT) != MS5803_CMD_OK){
     return -1;
   }
-  
+
   delay(3); // Delay for conversion
-  
+
   // Send read ADC command
   if (ms5803_send_cmd(CMD_RDADC) != MS5803_CMD_OK){
     return -1;
   }
-  
+
   Wire.requestFrom(MS5803_I2C_DEVICE_ADDR, 3);
   delay(1);
   n = 0;
@@ -174,62 +367,52 @@ int ms5803_read_raw_temperature(unsigned long *raw_temperature){
 }
 
 
-
 void setup() {
-  Serial.begin(115200);
-  uint16_t coef_buff[8];
-  uint8_t serial_buff[2];
-  uint8_t press_buff[3];
-  int jndex;
-  unsigned long raw_pressure = 0;
-
-  pinMode(MS5803_VCC_PIN, OUTPUT);
-  digitalWrite(MS5803_VCC_PIN, HIGH);
-  pinMode(GPIO_2_VCC, OUTPUT);
-  digitalWrite(GPIO_2_VCC, HIGH);
-  //Serial.println("Mount LittleFS");
-  //if (!LittleFS.begin()) {
-  //  Serial.println("LittleFS mount failed");
-  //  return;
-  //}
-  //Serial.println("Formatting LittleFS filesystem");
-  //LittleFS.format();
-  //
+  //system_rtc_mem_read(64, &cycle_counter, 4); // Copy RTC memory value in current cycle counter
+  //if (cycle_counter > CYCLE_COUNTER_RST){cycle_counter = 0;} // This prevents errors in first boot if done by GPIO reset (RTC memeory gets wrong value)
+  pinMode(GPIO_SET_ACCESS_POINT, INPUT_PULLUP); // Set Access point pin
+  Wire.begin(); // I2C
+  WiFi.mode(WIFI_OFF); // Must turn the modem off; using disconnect won't work
+  WiFi.forceSleepBegin();
+  // Mount file system
+  if (!LittleFS.begin()) {
+    errorHandler(); // LittleFS mount failed
+  }
+#ifdef DEBUG_MODE
+  printDeviceInfo();
+  LittleFS.format(); // WARNING In debug mode the File system is formated at the start
+#endif // DEBUG_MODE  
+  // Initialyze MS5803_14
   if(ms5803_init() != MS5803_CMD_OK){
     errorHandler();
   }
-  Serial.println("\nMS5803 INIT OK");
-  
-  if(ms5803_read_coefficients(coef_buff) != MS5803_CMD_OK){
-    errorHandler();
+  // Setup data files and read the sensors
+  createDataFiles();
+
+  if (digitalRead(GPIO_SET_ACCESS_POINT) == LOW){ // Change to AP mode
+      digitalWrite(LED_BUILTIN, LOW); // LED on
+      //cycle_counter = 0;
+      system_rtc_mem_write(64, &cycle_counter, 4); // Reset the cycle counter
+      setAccessPoint();
   }
-  Serial.println("COEFFICIENTS");
-  for(int k=0;k<8;k++){
-    Serial.print(k);
-    Serial.print("-");
-    Serial.println(coef_buff[k]);
-  }
-  
-  Serial.println("RAW PRESSURE READINGS");
-  if(ms5803_read_raw_pressure(&raw_pressure) != MS5803_CMD_OK){
-    errorHandler();
-  }
-  
-  Serial.println(raw_pressure);
 }
 
+
 void loop() {
-  unsigned long raw_pressure = 0;
-  unsigned long raw_temperature = 0;
-  if(ms5803_read_raw_pressure(&raw_pressure) != MS5803_CMD_OK){
-    errorHandler();
+  cycle_counter = 0;
+  // Read data
+  unsigned long buff[2];
+  unsigned long p_buff[DATA_BUFF_LEN], t_buff[DATA_BUFF_LEN];
+  unsigned long start_time;
+  unsigned long end_time;
+  int exe_time[DATA_BUFF_LEN];
+  while(cycle_counter < DATA_BUFF_LEN){
+    dataAcquisition(buff); // buff[0]=pressure, buff[1]=temperature
+    p_buff[cycle_counter] = buff[0];
+    t_buff[cycle_counter] = buff[1];
+    exe_time[cycle_counter] = millis(); // Save timestamp of each measurement on data file
+    cycle_counter++;
   }
-  if(ms5803_read_raw_temperature(&raw_temperature) != MS5803_CMD_OK){
-    errorHandler();
-  }
-  
-  Serial.print(raw_pressure);
-  Serial.print(";");
-  Serial.println(raw_temperature);
-  delay(1000);  
+  // Append data after loop reached DATA_BUFF_LEN
+  appendData(p_buff, t_buff, exe_time, DATA_BUFF_LEN, data_file_path);
 }

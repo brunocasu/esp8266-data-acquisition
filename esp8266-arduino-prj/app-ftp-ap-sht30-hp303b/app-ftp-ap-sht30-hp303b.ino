@@ -41,7 +41,7 @@
 #define GPIO_SET_ACCESS_POINT 14 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 
 // Remove when deploying in production environment
-#define DEBUG_MODE
+//#define DEBUG_MODE
 
 #define CYCLE_COUNTER_RST 10000000
 unsigned long cycle_counter = 0;
@@ -68,7 +68,7 @@ FSInfo fs_info;
 
 const char* data_file_path = "/C01_data.csv";
 // Added at the creation of the Data file
-const char* csv_header_description = "CTR;HP303B_T(C);HP303B_P(Pa);SHT30_45_T(C);SHT30_45_RH(%);SHT30_44_T(C);SHT30_44_RH(%);PPMV;DP(C);ABS_HUM(g/m3);EX_t(ms)"; 
+const char* csv_header_description = "CTR;HP303B_T(C);HP303B_P(Pa);SHT30_45_T(C);SHT30_45_RH(%);SHT30_44_T(C);SHT30_44_RH(%);PPMV(Dry);DP(C);ABS_HUM(g/m3);EX_t(ms)"; 
 
 /** PF definitions **/
 
@@ -168,7 +168,7 @@ void calculatePPMV(float *arr, float T, int32_t P_Pa, float RH){
       Pws = (float) A * pow(10, ((m * T) / (Tn + T))); // Equations from Vaisala
       //Pws = (float) pC * 6.1121 * exp((pA * T) / (pB + T));
       Pw = (float) Pws*(RH/100);
-      ppmv = (float) 1000000 * (Pw/P);
+      ppmv = (float) 1000000 * (Pw/(P-Pw));
       float div = (float) log10(Pw/A);
       dew_point = (float) Tn / ((m/div)-1);
       abs_hum = (float) C * ((Pw*100)/(T+273.15));
@@ -202,7 +202,7 @@ void calculatePPMV(float *arr, float T, int32_t P_Pa, float RH){
 }
 
 /**
- * Read and save sensor data on data files separetelly - deprecated
+ * Read and save sensor data on data file
  */
 void dataAcquisition(){
   double hp_T=0;

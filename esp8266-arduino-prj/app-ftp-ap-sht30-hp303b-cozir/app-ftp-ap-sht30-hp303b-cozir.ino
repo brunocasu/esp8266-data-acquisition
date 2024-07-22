@@ -1,5 +1,5 @@
 /*
- * app-ftp-ap-sht30-hp303b.ino
+ * app-ftp-ap-sht30-hp303b-cozir.ino
  *
  * This program is free software: you can redistribute it and/or modify it under the terms of the
  * GNU General Public License as published by the Free Software Foundation, either version 3 of
@@ -12,10 +12,10 @@
  * You should have received a copy of the GNU General Public License along with this program. If not,
  * see <https://www.gnu.org/licenses/>.
  *
- *  Created on: May 16, 2024
+ *  Created on: July 17, 2024
  *      Author: Bruno Casu
  *
- *  Version 2.0 (July 9, 2024)
+ *  Version 1.0 (July 17, 2024)
  */
  
 #include <ESP8266WiFi.h>
@@ -28,6 +28,7 @@
 #include <sht30.h>
 #include <LOLIN_HP303B.h>
 #include <math.h>
+#include <cozir_stream.h>
 
 #define SERIAL_SPEED  115200
 #define APP_VERSION "app-ftp-ap-sht30-hp303b_v2.0"
@@ -205,6 +206,7 @@ void calculatePPMV(float *arr, float T, int32_t P_Pa, float RH){
  * Read and save sensor data on data files separetelly - deprecated
  */
 void dataAcquisition(){
+  CZR_STREAM czr_str(12, 13);
   double hp_T=0;
   int32_t temp; // not used (integer value of temeprature reading)
   int32_t hp_P=0;
@@ -261,6 +263,12 @@ void dataAcquisition(){
     data_file.flush(); // Ensure writting before returning
     data_file.close();
   }
+  
+#ifdef DEBUG_MODE
+    Serial.println("\n-->Cozir data:");
+    Serial.print("CO2(%): ");
+    Serial.println(czr_str.read_co2());
+#endif // DEBUG_MODE  
 }
 
 
