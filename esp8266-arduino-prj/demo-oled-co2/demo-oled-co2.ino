@@ -14,6 +14,8 @@
  *
  *  Created on: July 16, 2024
  *      Author: Bruno Casu
+ *      
+ *  Version 1.1 (July 16, 2024)
  */
 
 #include "Arduino.h"
