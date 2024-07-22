@@ -14,6 +14,8 @@
  *
  *  Created on: Jan 25, 2024
  *      Author: Bruno Casu
+ *  
+ *  Version 1.0 (Jan 25, 2024)
  */
  
 #include <WEMOS_SHT3X.h>
