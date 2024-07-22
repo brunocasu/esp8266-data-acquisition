@@ -15,7 +15,7 @@
  *  Created on: June 05, 2024
  *      Author: Bruno Casu
  *
- *  Version 1.0 (June 05, 2024)
+ *  Version 1.1 (June 05, 2024)
  */
  
 #include <ESP8266WiFi.h>
@@ -29,7 +29,6 @@
 
 // Defines for the data aquisition system
 #define DELAY_TIME_MS 100
-//#define AP_CYCLES 300
 #define AP_CYCLES 180000 // Multiples of 10 ms, period of AP mode between readings
 // #define GPIO_SET_ACCESS_POINT 14 // Removed
 
@@ -203,7 +202,6 @@ void dataAcquisition() {
     if(p_ret == MS5803_CMD_OK && t_ret == MS5803_CMD_OK){ // Readings OK - Write data
       appendData(raw_pressure, raw_temperature, data_file_path);
     }
-    //else{appendData(100, 200, data_file_path);}//WARNING REMOVE
   }
 }
 
@@ -398,12 +396,10 @@ void setup() {
   if(ms5803_init() != MS5803_CMD_OK){
     errorHandler();
   }
-  // ESP.deepSleep(SLEEP_TIME_MS*1000, WAKE_NO_RFCAL); // Deep Sleep - MCU reset at wakeup - GPIO16 must be connected to RST
 }
 
 
 void loop() {
-  //system_rtc_mem_read(64, &cycle_counter, 4); // Copy RTC memory value in current cycle counter
   // Setup data files and read the sensors
   createDataFiles();
   dataAcquisition();
