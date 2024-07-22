@@ -15,7 +15,7 @@
  *  Created on: May 16, 2024
  *      Author: Bruno Casu
  *
- *  Version 2.0 (July 9, 2024)
+ *  Version 2.0 (July 22, 2024)
  */
  
 #include <ESP8266WiFi.h>
