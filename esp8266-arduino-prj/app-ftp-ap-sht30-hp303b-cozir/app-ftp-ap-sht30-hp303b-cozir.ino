@@ -15,7 +15,7 @@
  *  Created on: July 17, 2024
  *      Author: Bruno Casu
  *
- *  Version 1.0 (July 17, 2024)
+ *  Version 1.0 (July 30, 2024)
  */
  
 #include <ESP8266WiFi.h>
@@ -57,7 +57,7 @@ LOLIN_HP303B hp303b_handler;
 IPAddress local_IP(10,10,10,1); // FTP server address
 IPAddress gateway(10,10,10,1);
 IPAddress subnet_mask(255,255,255,0);
-const char* ssid_AP = "C01-AP-ESP8266"; // No password set
+const char* ssid_AP = "Z00-AP-ESP8266"; // No password set
 
 // FTP server access configuration
 const char* user_FTP = "esp8266";
@@ -67,9 +67,13 @@ FtpServer ftpSrv; // Handler
 // LittleFs info
 FSInfo fs_info;
 
-const char* data_file_path = "/C01_data.csv";
+// Cozir CO2 sensor 
+SoftwareSerial sws(13, 12);  // RX, TX, optional inverse logic
+COZIR czr(&sws);
+
+const char* data_file_path = "/Z00_data.csv";
 // Added at the creation of the Data file
-const char* csv_header_description = "CTR;HP303B_T(C);HP303B_P(Pa);SHT30_45_T(C);SHT30_45_RH(%);SHT30_44_T(C);SHT30_44_RH(%);PPMV;DP(C);ABS_HUM(g/m3);EX_t(ms)"; 
+const char* csv_header_description = "CTR;HP303B_T(C);HP303B_P(Pa);SHT30_45_T(C);SHT30_45_RH(%);SHT30_44_T(C);SHT30_44_RH(%);PPMV;DP(C);ABS_HUM(g/m3);CO2(%);EX_t(ms)"; 
 
 /** PF definitions **/
 
@@ -203,10 +207,10 @@ void calculatePPMV(float *arr, float T, int32_t P_Pa, float RH){
 }
 
 /**
- * Read and save sensor data on data files separetelly - deprecated
+ * Read and save sensor data on data file
  */
 void dataAcquisition(){
-  CZR_STREAM czr_str(12, 13);
+  float read_co2;
   double hp_T=0;
   int32_t temp; // not used (integer value of temeprature reading)
   int32_t hp_P=0;
@@ -259,18 +263,103 @@ void dataAcquisition(){
       data_file.print(";");
     }
     else{data_file.print(";;;");} // Empty data
+
+    //Try to read CO2 measurement
+    sws.begin(9600);
+    czr.init();
+    read_co2 = (float)readCozirStream();
+    if(read_co2>0){
+      data_file.print(read_co2/100, 2);
+      data_file.print(";");
+#ifdef DEBUG_MODE
+      Serial.println("\n-->Cozir data (float):");
+      Serial.print("CO2(%): ");
+      Serial.println(read_co2/100);
+#endif // DEBUG_MODE  
+    }
+
     data_file.print(millis());
     data_file.flush(); // Ensure writting before returning
     data_file.close();
   }
   
-#ifdef DEBUG_MODE
-    Serial.println("\n-->Cozir data:");
-    Serial.print("CO2(%): ");
-    Serial.println(czr_str.read_co2());
-#endif // DEBUG_MODE  
+
+  
+
+
+
 }
 
+/**
+ * This function parses the inut string to retrieve the CO2 measurement
+ * The Cozir sensor on Streaming mode sends characters as the example: "Z 00026"
+ * This function returns the numerical value (int) of the parsed input string
+ * THe value, when multipled by 100, corrsponds to the CO2 measurement in PPM
+ */
+int parseCozirStream(String input) {
+  // Find the position of 'Z' in the input string
+  int zPos = input.indexOf('Z');
+
+  // If 'Z' is found
+  if (zPos != -1) {
+    // Extract the substring starting from 'Z' position
+    String numberString = input.substring(zPos + 2); // Skip 'Z ' to get the number part
+
+    // Trim any leading or trailing whitespace
+    numberString.trim();
+
+    // Convert the string to an integer
+    int sensorValue = numberString.toInt();
+
+    // Return the parsed integer value
+    return sensorValue;
+  }
+
+  // If 'Z' is not found or parsing fails, return a default value or handle the error appropriately
+  return -1;
+}
+
+/**
+ * Set the Cozir sensor to Streaming mode and reads the first full string sent
+ * Return the CO2 measurement in ppm/100
+ * 
+ */
+int readCozirStream(void){
+  czr.setOperatingMode(CZR_STREAMING);
+  String result = "";
+  char currentChar;
+
+  // Wait for 'Z' character
+  while (sws.available()) {
+    currentChar = sws.read();
+    if (currentChar == 'Z') {
+      result += currentChar;
+      break;
+    }
+  }
+
+  // If 'Z' character detected, read the next 6 characters
+  if (currentChar == 'Z') {
+    for (int i = 0; i < 6; i++) {
+      while (!sws.available()); // Wait until data available
+      currentChar = sws.read();
+      result += currentChar;
+    }
+  }
+#ifdef DEBUG_MODE
+  Serial.print("\n-->Cozir STRING READ: ");
+  Serial.println(result);
+#endif // DEBUG_MODE  
+  int sensorValue = parseCozirStream(result);
+  // Print the parsed sensor value
+  if(sensorValue > 0){
+    return sensorValue;
+  }
+  else {
+    return 0;
+  }
+
+}
 
 void setup() {
   system_rtc_mem_read(64, &cycle_counter, 4); // Copy RTC memory value in current cycle counter
