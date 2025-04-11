@@ -69,7 +69,7 @@ static const unsigned char PROGMEM logo16_glcd_bmp[] =
 #endif
 
 // SHT30: Temperature and humidity sensor
-SHT30 sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH); // Addr 0x45
+//SHT30 sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH); // Addr 0x45
 
 // Luminox LOX-O2-F: 0-25% O2 sensor + Temperature and pressure
 SoftwareSerial swsLox(14, 15); // GPIO 15 (TX) goes into LOX-02 Pin 4. GPIO 14 (RX) goes into LOX-02 Pin 3.
@@ -86,7 +86,9 @@ void setup()
   czr.init();
 
   Serial.begin(115200); // USB serial (debug only)
-
+  //startPump();
+  
+  Wire.begin();
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // initialize with the I2C addr 0x3C (for the 64x48)
   // internally, this will display the splashscreen.
   display.display();
@@ -106,6 +108,21 @@ void loop()
     writeData(lox_data, czr_data); // Refresh the data on the display
   }
   delay(1000);
+}
+
+/**
+ * 
+ * 
+ */
+void startPump(void){
+  // SPRINTIR-WF-100: 0-100% CO2 sensor
+  //SoftwareSerial sws(16, 0);  // RX, TX, optional inverse logic
+  swsCozir.begin(9600);
+  
+  swsCozir.print("D,*");                      //send that string to the Atlas Scientific product
+  swsCozir.print('\r');
+
+  //sws.end();
 }
 
 
@@ -360,7 +377,7 @@ int parseCozirStream(String input) {
  * 
  */
 String formatCozirReading (int val_ppm){
-  float percentage = val_ppm+900;
+  float percentage = val_ppm;
   String result;
   percentage = percentage/100; // Convert PPM to Percentage
   // Check if value is 10.0 or higher, use one decimal place

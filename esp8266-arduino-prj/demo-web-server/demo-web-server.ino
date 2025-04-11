@@ -1,5 +1,5 @@
 /*
- * app-portable-cozir-oxygen.ino
+ * app-ftp-ap-sht30-hp303b-cozir.ino
  *
  * This program is free software: you can redistribute it and/or modify it under the terms of the
  * GNU General Public License as published by the Free Software Foundation, either version 3 of
@@ -12,13 +12,16 @@
  * You should have received a copy of the GNU General Public License along with this program. If not,
  * see <https://www.gnu.org/licenses/>.
  *
- *  Created on: July 31, 2024
+ *  Created on: April 10, 2025
  *      Author: Bruno Casu
  *
- *  Version 1.0 (July 31, 2024)
+ *  Version 1.0 (April 10, 2025)
  */
  
 #include <ESP8266WiFi.h>
+#include <Hash.h>
+#include <ESPAsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 #include <PolledTimeout.h>
 #include <LittleFS.h>
 #include <Wire.h>
@@ -31,19 +34,17 @@
 #include <cozir_stream.h>
 
 #define SERIAL_SPEED  115200
-#define APP_VERSION "app-portable-cozir-oxygen_v1.0"
+#define APP_VERSION "demo_web_server_v1.0"
 
 // Defines for the data aquisition system
 #define SHT30_I2C_ADDR_PIN_HIGH 0x45  // Jumper NOT connected
 #define SHT30_I2C_ADDR_PIN_LOW 0x44  // Jumper connected
 #define HP303B_I2C_ADDR_PIN_HIGH 0x77  // Jumper NOT connected
 #define HP303B_OVERSAMPLING_RATE  2  // From 1 to 7 (7 is  the highest oversampling rate)
-#define SLEEP_TIME_MS 1800000  // Interval between measurements in ms
-// WARNING AP mode pin changed to pin 5 from previous versions of the SW
-#define GPIO_SET_ACCESS_POINT 5 // On Wemos D1 Mini - Pin number 5 (GPIO5)
+#define REFRESH_TIME_MS 1000  // Interval between HTTP GET requests in ms
+#define GPIO_SET_ACCESS_POINT 14 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 // Maximum attempts to read LOX-O2 sensor
 #define LOX_MAX_READ_ATTEMPTS 10
-
 // Remove when deploying in production environment
 #define DEBUG_MODE
 
@@ -78,9 +79,120 @@ COZIR czr(&swsCozir);
 // LOX-O2 sensor
 SoftwareSerial swsLox(14, 15); // Port 14 (RX) goes into LOX-02 Port 3. Port 15 (TX) goes into LOX-02 Port 4.
 
-const char* data_file_path = "/X01_data.csv";
+const char* data_file_path = "/Z00_data.csv";
 // Added at the creation of the Data file
-const char* csv_header_description = "CTR;HP303B_T(C);HP303B_P(Pa);SHT30_45_T(C);SHT30_45_RH(%);SHT30_44_T(C);SHT30_44_RH(%);PPMV;DP(C);ABS_HUM(g/m3);CO2(%);O2(%);EX_t(ms)"; 
+const char* csv_header_description = "CTR;HP303B_T(C);HP303B_P(Pa);SHT30_45_T(C);SHT30_45_RH(%);SHT30_44_T(C);SHT30_44_RH(%);PPMV;DP(C);ABS_HUM(g/m3);CO2(%);EX_t(ms)"; 
+
+// HTTP server
+
+// Create AsyncWebServer object on port 80
+AsyncWebServer server(80);
+
+// Sensor values, updated in dataAcquisition()
+// variables made global so they can be accessed by the web server callback
+float read_o2=0; 
+float read_co2=0;
+double hp_T=0;
+int32_t hp_P=0;
+float hp_P_mbar=0;
+// int32_t temp; // not used (integer value of temeprature reading)
+float sht_T=0;
+float sht_RH=0;
+// float arr[5]={0}; // return values of the calculatePPMV func: [0]=Pws, [1]=Pw, [2]=ppmv, [3]=dew_point, [4]=abs_hum
+float dew_point=0; // Deg Celsius
+float abs_hum=0; // g/m3
+
+unsigned long previousMillis = 0;
+
+// HTTP page
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html {
+      font-family: Arial;
+      display: inline-block;
+      margin: 0px auto;
+      text-align: center;
+    }
+    h2 { font-size: 2.0rem; }
+    p { font-size: 2.0rem; }
+    .units { font-size: 1.2rem; }
+    .param-labels {
+      font-size: 1.2rem;
+      vertical-align: middle;
+      padding-bottom: 15px;
+    }
+  </style>
+</head>
+<body>
+  <h2>ESP8266 Server</h2>
+  <p>
+    <span class="param-labels">SHT30 Temperature</span> 
+    <span id="temperature">--</span>
+    <sup class="units">&deg;C</sup>
+  </p>
+  <p>
+    <span class="param-labels">SHT30 RHumidity</span>
+    <span id="humidity">--</span>
+    <sup class="units">%</sup>
+  </p>
+  <p>
+    <span class="param-labels">HP303 Temperature</span> 
+    <span id="temperature2">--</span>
+    <sup class="units">&deg;C</sup>
+  </p>
+  <p>
+    <span class="param-labels">HP303 Pressure</span>
+    <span id="pressure">--</span>
+    <sup class="units">mbar</sup>
+  </p>
+  <p>
+    <span class="param-labels">Dew Point</span> 
+    <span id="dew_point">--</span>
+    <sup class="units">&deg;C</sup>
+  </p>
+  <p>
+    <span class="param-labels">Abs Humidity</span>
+    <span id="abs_humidity">--</span>
+    <sup class="units">g/m3</sup>
+  </p>
+    <p>
+    <span class="param-labels">CO2</span>
+    <span id="co2">--</span>
+    <sup class="units">%</sup>
+  </p>
+    <p>
+    <span class="param-labels">O2</span>
+    <span id="o2">--</span>
+    <sup class="units">%</sup>
+  </p>
+</body>
+<script>
+  function updateSensorValues() {
+    var xhttp = new XMLHttpRequest();
+    xhttp.onreadystatechange = function() {
+      if (this.readyState == 4 && this.status == 200) {
+        var data = JSON.parse(this.responseText); // Parse the JSON response
+        document.getElementById("temperature").innerHTML = data.temperature;
+        document.getElementById("humidity").innerHTML = data.humidity;
+        document.getElementById("temperature2").innerHTML = data.temperature2;
+        document.getElementById("pressure").innerHTML = data.pressure;
+        document.getElementById("dew_point").innerHTML = data.dew_point;
+        document.getElementById("abs_humidity").innerHTML = data.abs_humidity;
+        document.getElementById("co2").innerHTML = data.co2;
+        document.getElementById("o2").innerHTML = data.o2;
+      }
+    };
+    xhttp.open("GET", "/getSensorValues", true); // Fetch data from the server
+    xhttp.send();
+  }
+  // Update sensor values every second
+  setInterval(updateSensorValues, 1000);
+</script>
+</html>)rawliteral";
+
 
 /** PF definitions **/
 
@@ -104,11 +216,12 @@ void printDeviceInfo(){
   Serial.begin(SERIAL_SPEED);
   delay(50);
   Serial.print("\n\n-->SW VERSION: ");
+  Serial.print("\n\n-->DEMO WEB SERVER APP");
   Serial.println(APP_VERSION);
   Serial.print(F("Cycle counter = "));
   Serial.println(cycle_counter);
-  Serial.print("\n-->SLEEP_TIME_MS: ");
-  Serial.println(SLEEP_TIME_MS);
+  Serial.print("\n-->REFRESH TIME (ms): ");
+  Serial.println(REFRESH_TIME_MS);
   // FS info
   Serial.print("-->LittleFS Mount OK\nTotal FS Size (kB):");
   Serial.println(fs_info.totalBytes*0.001);
@@ -117,7 +230,7 @@ void printDeviceInfo(){
   // FTP-AP info
   Serial.print("\n-->AP Mode - WiFi SSID (NO PASSWORD): ");
   Serial.println(ssid_AP);
-  Serial.print("\n-->FTP Server IP Addr: ");
+  Serial.print("\n-->Server IP Addr: ");
   Serial.println(WiFi.softAPIP());
   Serial.print("Plain FTP Connection (insecure)\nFTP_USR: ");
   Serial.println(user_FTP);
@@ -127,7 +240,7 @@ void printDeviceInfo(){
 }
 
 /**
- * Configures the ESP8266 as WiFi Access Point, and starts the FTP server
+ * Configures the ESP8266 as WiFi Access Point
  */
 void setAccessPoint() {
   // Configure WiFi Access point
@@ -135,6 +248,9 @@ void setAccessPoint() {
   WiFi.softAP(ssid_AP); // No password for connecting
   WiFi.softAPConfig(local_IP, gateway, subnet_mask);
   printDeviceInfo();
+}
+
+void setFtpServer() {
   // Start FTP server
   ftpSrv.begin(user_FTP, pwd_FTP);
   ftpSrv.setLocalIp(WiFi.softAPIP()); // Must setLocalIP as the same as the one in softAPConfig()
@@ -142,9 +258,6 @@ void setAccessPoint() {
     ftpSrv.handleFTP();
     delay(10);
   }
-  WiFi.softAPdisconnect(true);
-  WiFi.mode(WIFI_OFF);
-  WiFi.forceSleepBegin();
 }
 
 /**
@@ -173,8 +286,8 @@ void calculatePPMV(float *arr, float T, int32_t P_Pa, float RH){
     float Pws=0; // Water vapor saturation pressure (hPa)
     float Pw=0; // Water vapor pressure (hPa)
     float ppmv=0; // Water vapor content Volume/Volume (ppmv)(wet)
-    float dew_point=0; // Deg Celsius
-    float abs_hum=0; // g/m3
+    //float dew_point=0; // Deg Celsius
+    //float abs_hum=0; // g/m3
     float A=6.116441, m=7.591386, Tn=240.7263, C=2.16679; // Constants from Vaisala
     if (P!=0 && RH!=0){
       Pws = (float) A * pow(10, ((m * T) / (Tn + T))); // Equations from Vaisala
@@ -217,14 +330,13 @@ void calculatePPMV(float *arr, float T, int32_t P_Pa, float RH){
  * Read and save sensor data on data file
  */
 void dataAcquisition(){
-  float read_co2;
-  double hp_T=0;
+  float result_co2=0;
+  float result_o2=0;
+  //double hp_T=0;
   int32_t temp; // not used (integer value of temeprature reading)
-  int32_t hp_P=0;
-  float sht_RH=0;
+  //int32_t hp_P=0;
+  //float sht_RH=0;
   float arr[5]={0}; // return values of the calculatePPMV func: [0]=Pws, [1]=Pw, [2]=ppmn, [3]=dew_point, [4]=abs_hum
-  float read_o2=0;
-  
   if (LittleFS.exists(data_file_path)){ // File exists
     File data_file = LittleFS.open(data_file_path, "a");
     if (!data_file) {
@@ -241,12 +353,14 @@ void dataAcquisition(){
     }
     data_file.print(";");
     if(hp303b_handler.measurePressureOnce(hp_P, HP303B_OVERSAMPLING_RATE) == 0){ // Pressure reading OK
+      hp_P_mbar = hp_P/100;
       data_file.print(hp_P);
     }
     data_file.print(";");
     // Try to read SHT30 addr 45
     if(sht30_1_handler.read_single_shot() == SHT30_READ_OK){
       sht_RH = (float) sht30_1_handler.humidity; // To calculate the PPMV levels, the RH from SHT30 Addr 45 is used by default
+      sht_T = (float) sht30_1_handler.cTemp;
       data_file.print(sht30_1_handler.cTemp, 2);
       data_file.print(";");
       data_file.print(sht30_1_handler.humidity, 2);
@@ -274,27 +388,28 @@ void dataAcquisition(){
     else{data_file.print(";;;");} // Empty data
 
     //Try to read CO2 measurement
-    //swsCozir.begin(9600);
-    //czr.init();
-    read_co2 = (float)readCozirStream();
-    if(read_co2>0){
+    result_co2 = (float)readCozirStream();
+    if(result_co2>0){
+      read_co2 = result_co2/100; // update global only if return valus is != 0
       data_file.print(read_co2/100, 2);
+      data_file.print(";");
 #ifdef DEBUG_MODE
       Serial.println("\n-->Cozir data (float):");
       Serial.print("CO2(%): ");
       Serial.println(read_co2/100);
 #endif // DEBUG_MODE  
     }
+
     data_file.print(";");
-    
     // Try to read O2 measurement
     //swsLox.begin(9600);
-    read_o2 = readLoxStream();
-    if (read_o2 > 0){
+    result_o2 = readLoxStream();
+    if (result_o2 > 0){
+      read_o2 = result_o2;
       data_file.print(read_o2, 2);
     }
-    data_file.print(";");
     
+    data_file.print(";");
     data_file.print(millis());
     data_file.flush(); // Ensure writting before returning
     data_file.close();
@@ -336,16 +451,21 @@ int parseCozirStream(String input) {
  * 
  */
 int readCozirStream(void){
+  int iteration_limit = 0; // 
   String result = "";
   char currentChar;
   swsCozir.begin(9600);
   czr.init();
   czr.setOperatingMode(CZR_STREAMING);
-
+  // After sending set operating mode the serial hangs - serial listener must detect first Z sent.
+  // delay(100);
   // Wait for 'Z' character
-  while (swsCozir.available()) {
+  //while (swsCozir.available()) {
+  while (iteration_limit < 2000) {
+    iteration_limit++;
     currentChar = swsCozir.read();
-    if (currentChar == 'Z') {
+    Serial.print(currentChar);
+    if (currentChar == 'Z') { // exit loop when Z char is detected
       result += currentChar;
       break;
     }
@@ -355,6 +475,7 @@ int readCozirStream(void){
   if (currentChar == 'Z') {
     for (int i = 0; i < 6; i++) {
       while (!swsCozir.available()); // Wait until data available
+      // Serial.print(currentChar);
       currentChar = swsCozir.read();
       result += currentChar;
     }
@@ -458,6 +579,28 @@ float readLoxStream(void){
   return sensorValue;
 }
 
+// Serve the HTML page
+void handleRoot(AsyncWebServerRequest *request) {
+  request->send_P(200, "text/html", index_html);
+}
+
+
+// Serve sensor values as JSON
+void handleSensorValues(AsyncWebServerRequest *request) {
+  String json = "{";
+  json += "\"temperature\":" + String(sht_T) + ",";
+  json += "\"humidity\":" + String(sht_RH) + ",";
+  json += "\"temperature2\":" + String(hp_T) + ",";
+  json += "\"pressure\":" + String(hp_P_mbar) + ",";
+  json += "\"dew_point\":" + String(dew_point) + ",";
+  json += "\"abs_humidity\":" + String(abs_hum) + ",";
+  json += "\"co2\":" + String(read_co2) + ",";
+  json += "\"o2\":" + String(read_o2);
+  json += "}";
+  request->send(200, "application/json", json);
+}
+
+
 void setup() {
   system_rtc_mem_read(64, &cycle_counter, 4); // Copy RTC memory value in current cycle counter
   if (cycle_counter > CYCLE_COUNTER_RST){cycle_counter = 0;} // This prevents errors in first boot if done by GPIO reset (RTC memeory gets wrong value)
@@ -465,34 +608,44 @@ void setup() {
   digitalWrite(LED_BUILTIN, HIGH); // LED off
   pinMode(GPIO_SET_ACCESS_POINT, INPUT_PULLUP); // Set Access point pin
   Wire.begin(); // I2C
-  WiFi.mode(WIFI_OFF); // Must turn the modem off; using disconnect won't work
-  WiFi.forceSleepBegin();
+  //WiFi.mode(WIFI_OFF); // Must turn the modem off; using disconnect won't work
+  //WiFi.forceSleepBegin();
   // Mount file system
   if (!LittleFS.begin()) {
     errorHandler(); // LittleFS mount failed
   }
+  createDataFiles();
+
+  setAccessPoint();
+
+  // Route for root / web page
+  server.on("/", HTTP_GET, handleRoot);
+  // Route for updating sensor values
+  server.on("/getSensorValues", HTTP_GET, handleSensorValues);
+
+  // Start server
+  server.begin();
+  
 #ifdef DEBUG_MODE
   printDeviceInfo();
 #endif // DEBUG_MODE  
 
-  // Setup data files and read the sensors
-  createDataFiles();
-  dataAcquisition();
-  
-  // Increment and save the current cycle counter value in RTC memory
-  cycle_counter++;
-  system_rtc_mem_write(64, &cycle_counter, 4);
-
-  if (digitalRead(GPIO_SET_ACCESS_POINT) == LOW){ // Change to AP mode
-    digitalWrite(LED_BUILTIN, LOW); // LED on
-    cycle_counter = 0;
-    system_rtc_mem_write(64, &cycle_counter, 4); // Reset the cycle counter
-    setAccessPoint();
-  }
-
-  // Sleep untile next cycle
-  ESP.deepSleep(SLEEP_TIME_MS*1000, WAKE_NO_RFCAL); // Deep Sleep - MCU reset at wakeup - GPIO16 must be connected to RST
 }
 
 
-void loop() { }
+void loop() { 
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= REFRESH_TIME_MS) {
+    // Sensor reading interval
+    previousMillis = currentMillis;
+    dataAcquisition(); // update global variables
+  }
+
+  //if (digitalRead(GPIO_SET_ACCESS_POINT) == LOW){ // Change to FTP mode
+  //  digitalWrite(LED_BUILTIN, LOW); // LED on
+    //cycle_counter = 0;
+    //system_rtc_mem_write(64, &cycle_counter, 4); // Reset the cycle counter
+  //  setFtpServer();
+  //}
+
+}

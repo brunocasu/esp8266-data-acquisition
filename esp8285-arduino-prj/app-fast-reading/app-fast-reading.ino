@@ -62,7 +62,7 @@ unsigned long cycle_counter = 0;
 IPAddress local_IP(10,10,10,1); // FTP server address
 IPAddress gateway(10,10,10,1);
 IPAddress subnet_mask(255,255,255,0);
-const char* ssid_AP = "F01-AP-ESPM2"; // No password set
+const char* ssid_AP = "F04-AP-ESPM2"; // No password set
 
 // FTP server access configuration
 const char* user_FTP = "espm2";
@@ -73,9 +73,9 @@ FtpServer ftpSrv; // Handler
 FSInfo fs_info;
 
 // Data file configuration
-const char* coef_file_path = "/F01_coef.txt";
+const char* coef_file_path = "/F04_coef.txt";
 const char* coef_header_description = "C0;C1;C2;C3;C4;C5;C6;CRC;"; // Added at the creation of the Data file
-const char* data_file_path = "/F01_raw_data.csv";
+const char* data_file_path = "/F04_raw_data.csv";
 const char* data_csv_header_description = "Ctr;RawPressure;RawTemperature;Time(ms)"; // Added at the creation of the Data file
 
 
@@ -412,6 +412,7 @@ void loop() {
     t_buff[cycle_counter] = buff[1];
     exe_time[cycle_counter] = millis(); // Save timestamp of each measurement on data file
     cycle_counter++;
+    delay(500);
   }
   // Append data after loop reached DATA_BUFF_LEN
   appendData(p_buff, t_buff, exe_time, DATA_BUFF_LEN, data_file_path);
