@@ -57,6 +57,10 @@ float read_co2=0;     // CO2 reading (in %)
 
 int statusWiFi = WL_IDLE_STATUS;
 WiFiServer server(80);
+WiFiClient client;
+
+float global_co2 = 0;
+float global_o2 = 0;
 
 /* PFD */
 int parseCozirStream(String input);
@@ -65,7 +69,11 @@ int initCozirDevice(void);
 int calibrateCozirDevice(void);
 void pwmMotorCtrl(int div, int motor_ctrl_pin);
 void relayMotorCtrl(int motor_ctrl_pin, int relay_pin, int op);
-
+void handleRoot(WiFiClient &client);
+void handleSensorData(WiFiClient &client);
+void handleMotorCtrl(WiFiClient &client);
+void handleNotFound(WiFiClient &client);
+void printWiFiStatus(void);
 
 /* PF */
 /**
@@ -420,79 +428,138 @@ void loop() {
     global_state = FSM_AP_SERVER; // update state
     eventHandler(EVENT_CODE_RUNNING);
   }
-  // compare the previous statusWiFi to the current status
-  if (statusWiFi != WiFi.status()) {
-    // it has changed update the variable
-    statusWiFi = WiFi.status();
-
-    if (statusWiFi == WL_AP_CONNECTED) {
-      // a device has connected to the AP
-      Serial.println("Device connected to AP");
-    } else {
-      // a device has disconnected from the AP, and we are back in listening mode
-      Serial.println("Device disconnected from AP");
-    }
-  }
-  
-  WiFiClient client = server.available();   // listen for incoming clients
-
-  if (client) {                             // if you get a client,
-    Serial.println("new client");           // print a message out the serial port
-    String currentLine = "";                // make a String to hold incoming data from the client
-    while (client.connected()) {            // loop while the client's connected
-      delayMicroseconds(10);                // This is required for the Arduino Nano RP2040 Connect - otherwise it will loop so fast that SPI will never be served.
-      if (client.available()) {             // if there's bytes to read from the client,
-        char c = client.read();             // read a byte, then
-        Serial.write(c);                    // print it out to the serial monitor
-        if (c == '\n') {                    // if the byte is a newline character
-
-          // if the current line is blank, you got two newline characters in a row.
-          // that's the end of the client HTTP request, so send a response:
-          if (currentLine.length() == 0) {
-            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-            // and a content-type so the client knows what's coming, then a blank line:
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
-            client.println();
-
-            // the content of the HTTP response follows the header:
-            //client.print("Click <a href=\"/H\">here</a> turn the LED on<br>");
-            //client.print("Click <a href=\"/L\">here</a> turn the LED off<br>");
-            client.print("<p style='font-size:48px; margin-bottom:20px;'>Click <a href=\"/H\">here</a> to turn the motor ON on</p>");
-            client.print("<p style='font-size:48px;'>Click <a href=\"/L\">here</a> to turn the motor OFF off</p>");
-
-
-            // The HTTP response ends with another blank line:
-            client.println();
-            // break out of the while loop:
-            break;
-          }
-          else {      // if you got a newline, then clear currentLine:
-            currentLine = "";
-          }
-        }
-        else if (c != '\r') {    // if you got anything else but a carriage return character,
-          currentLine += c;      // add it to the end of the currentLine
-        }
-
-        // Check to see if the client request was "GET /H" or "GET /L":
-        if (currentLine.endsWith("GET /H")) {
-          //digitalWrite(LED_BUILTIN, HIGH);               // GET /H turns the LED on
-          pwmMotorCtrl(PWM_CTRL_POWER_2, GPIO_PWM_MOTOR_1);
-        }
-        if (currentLine.endsWith("GET /L")) {
-          //digitalWrite(LED_BUILTIN, LOW);                // GET /L turns the LED off
-          pwmMotorCtrl(PWM_CTRL_POWER_0, GPIO_PWM_MOTOR_1);
+  client = server.available();
+  if (client) {
+    Serial.println("Client connected");
+    String req = "";
+    while (client.connected()) {
+      if (client.available()) {
+        char c = client.read();
+        req += c; // Append request
+        if (req.endsWith("\r\n\r\n")) {
+          break;
         }
       }
     }
-    // close the connection:
+
+    // Route handling based on request
+    if (req.indexOf("GET / ") >= 0) {
+      handleRoot(client);
+    }
+    else if (req.indexOf("GET /data") >= 0) {
+      handleSensorData(client);
+    }
+    else if (req.indexOf("GET /control") >= 0) {
+      handleMotorCtrl(client);
+    }
+    else if (req.indexOf("GET /m1p00") >= 0) {
+      pwmMotorCtrl(PWM_CTRL_POWER_0, GPIO_PWM_MOTOR_1);
+      handleMotorCtrl(client);
+    }
+    else if (req.indexOf("GET /m1pff") >= 0) {
+      pwmMotorCtrl(PWM_CTRL_POWER_1, GPIO_PWM_MOTOR_1);
+      handleMotorCtrl(client);
+    }
+    else if (req.indexOf("GET /m1p50") >= 0) {
+      pwmMotorCtrl(PWM_CTRL_POWER_2, GPIO_PWM_MOTOR_1);
+      handleMotorCtrl(client);
+    }
+    else if (req.indexOf("GET /m1p20") >= 0) {
+      pwmMotorCtrl(PWM_CTRL_POWER_5, GPIO_PWM_MOTOR_1);
+      handleMotorCtrl(client);
+    }
+    else if (req.indexOf("GET /m1p10") >= 0) {
+      pwmMotorCtrl(PWM_CTRL_POWER_10, GPIO_PWM_MOTOR_1);
+      handleMotorCtrl(client);
+    }
+    else {
+      handleNotFound(client);
+    }
+    delay(1);
+    global_co2 += 0.1; // REMOVE
+    global_o2 += 0.1;  // REMOVE
     client.stop();
-    Serial.println("client disconnected");
   }
 }
 
-void printWiFiStatus() {
+/**
+ *
+ *
+ */
+void handleRoot(WiFiClient &client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println();
+  client.println("<!DOCTYPE html><html><body>");
+
+  client.println("<h2 style='font-size:48px; margin-bottom:20px;'>Welcome to MKR Web Server</h2>");
+
+  client.println("<a href=\"/data\" style='"
+                 "display:inline-block; "
+                 "font-size:48px; "
+                 "margin-bottom:20px; "
+                 "padding:20px 40px; "
+                 "background-color:#4CAF50; "
+                 "color:white; "
+                 "text-decoration:none; "
+                 "border-radius:10px;'>View Sensor Data</a><br>");
+
+  client.println("<a href=\"/control\" style='"
+                 "display:inline-block; "
+                 "font-size:48px; "
+                 "margin-top:20px; "
+                 "padding:20px 40px; "
+                 "background-color:#2196F3; "
+                 "color:white; "
+                 "text-decoration:none; "
+                 "border-radius:10px;'>Toggle Motor</a>");
+
+  client.println("</body></html>");
+}
+
+void handleSensorData(WiFiClient &client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println();
+  client.println("<!DOCTYPE html><html><body>");
+  client.println("<h2>Sensor Data</h2>");
+  client.print("<p>CO2: ");
+  client.print(global_co2);
+  client.println(" %</p>");
+  client.print("<p> O2: ");
+  client.print(global_o2);
+  client.println(" %</p>");
+  client.println("<p><a href=\"/\">&#8592; Back to Home</a></p>");
+  client.println("</body></html>");
+}
+
+void handleMotorCtrl(WiFiClient &client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println();
+  client.println("<!DOCTYPE html><html><body>");
+
+  client.println("<h2 style='font-size:48px; margin-bottom:20px;'>MOTOR CONTROL</h2>");
+
+  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/m1p00\">MOTOR1 OFF</a></p>");
+  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/m1pff\">MOTOR1 TO 100% PWR</a></p>");
+  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/m1p50\">MOTOR1 TO 50% PWR</a></p>");
+  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/m1p20\">MOTOR1 TO 20% PWR</a></p>");
+  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/m1p10\">MOTOR1 TO 10% PWR</a></p>");
+  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/\">&#8592; Back to Home</a></p>");
+
+  client.println("</body></html>");
+}
+
+void handleNotFound(WiFiClient &client) {
+  client.println("HTTP/1.1 404 Not Found");
+  client.println("Content-Type: text/html");
+  client.println();
+  client.println("<h1>404 - Not Found</h1>");
+}
+
+
+void printWiFiStatus(void) {
   // print the SSID of the network you're attached to:
   Serial.print("\nSSID: ");
   Serial.println(WiFi.SSID());
