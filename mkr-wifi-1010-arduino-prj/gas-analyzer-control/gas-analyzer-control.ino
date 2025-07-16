@@ -8,7 +8,7 @@
 #include <cozir.h>
 
 /* DEFINES */
-#define AP_SSID "gas_analyzer_mkr1010"
+#define AP_SSID "GAS_ANALYZER"
 #define AP_PASS "gamkr1010"
 
 #define GPIO_PWM_MOTOR_1        2 // Function D2
@@ -19,20 +19,35 @@
 #define GPIO_SENSOR_PWR_CTRL    9 // Function D9
 
 #define EVENT_CODE_CRITICAL_ERROR 1
-#define EVENT_CODE_CALIBRATION    2
-#define EVENT_CODE_SETUP          3
-#define EVENT_CODE_RUNNING        4
-#define EVENT_CODE_CONNECTION     5
+#define EVENT_CODE_STARTUP_ERROR  2
+#define EVENT_CODE_CALIBRATION    3
+#define EVENT_CODE_SETUP          4
+#define EVENT_CODE_RUNNING        5
+#define EVENT_CODE_CONNECTION     6
 
 #define RELAY_CTRL_CRIT_SHUT_OFF    0
 #define RELAY_CTRL_NORMAL_SHUT_OFF  1
 #define RELAY_CTRL_PWR_ON           2
 
-#define COZIR_MAX_READINGS_ATTEMPTS 10
+#define PWM_CTRL_POWER_0            0   // motor off
+#define PWM_CTRL_POWER_1            1   // 100% power
+#define PWM_CTRL_POWER_2            2   // 50% power
+#define PWM_CTRL_POWER_5            5   // 20% power
+#define PWM_CTRL_POWER_10           10  // 10% power
+
+#define COZIR_MAX_READINGS_ATTEMPTS 5
 #define TIMER_CLK_DIV_100_MS_INTERVAL 4688
 #define TIMER_CLK_DIV_800_MS_INTERVAL 37500
 
+#define FSM_RESET     0
+#define FSM_SETUP     1
+#define FSM_AP_SERVER 2
+
+#define DEBUG_MODE
+
 /* PV */
+int global_state = FSM_RESET;
+
 char ssid[] = AP_SSID;  // Network SSID
 char pass[] = AP_PASS;  // Network password (use for WPA, or use as key for WEP)
 int keyIndex = 0;       // Network key index number (needed only for WEP)
@@ -47,9 +62,9 @@ WiFiServer server(80);
 int parseCozirStream(String input);
 int readCozirStream(void);
 int initCozirDevice(void);
-void calibrateCozirDevice(void);
+int calibrateCozirDevice(void);
 void pwmMotorCtrl(int div, int motor_ctrl_pin);
-void relayMotorControl(int motor_ctrl_pin, int relay_pin, int op);
+void relayMotorCtrl(int motor_ctrl_pin, int relay_pin, int op);
 
 
 /* PF */
@@ -75,21 +90,21 @@ void pwmMotorCtrl(int div, int motor_ctrl_pin){
  * relay_pin: GPIO connected to the relay
  * op: operation code
  */
-void relayMotorControl(int motor_ctrl_pin, int relay_pin, int op){
+void relayMotorCtrl(int motor_ctrl_pin, int relay_pin, int op){
   switch (op) {
     case RELAY_CTRL_CRIT_SHUT_OFF:
       // WARNING! In CRITICAL MOTOR SHUT DOWN the MCU might be restarted
-      digitalWrite(motor_ctrl_pin, LOW); // Power off motor via MOSFET
+      analogWrite(motor_ctrl_pin, 0); // Power off motor via MOSFET
       digitalWrite(relay_pin, LOW); // Cut off VCC for the motor via RELAY
       break;
     case  RELAY_CTRL_NORMAL_SHUT_OFF: // Graceful motor shut down
-      digitalWrite(motor_ctrl_pin, LOW); // First Power off motor via MOSFET
+      analogWrite(motor_ctrl_pin, 0); // First Power off motor via MOSFET
       delay(500); // Delay added to prevent voltage drop when switching the motor
       digitalWrite(relay_pin, LOW); // Cut off VCC for the motor via RELAY
       break;
     case RELAY_CTRL_PWR_ON: // Motor start
       if (digitalRead(relay_pin) == LOW){
-        digitalWrite(motor_ctrl_pin, LOW); // Power off motor via MOSFET
+        analogWrite(motor_ctrl_pin, 0); // Power off motor via MOSFET
         delay(100); // Delay added to prevent voltage drop when switching the motor
         digitalWrite(relay_pin, HIGH); // Connect VCC to the motor via RELAY
         delay(100);
@@ -102,21 +117,21 @@ void relayMotorControl(int motor_ctrl_pin, int relay_pin, int op){
 
 
 /**
- * This function parses the inut string to retrieve the CO2 measurement
+ * This function parses the input string to retrieve the CO2 measurement
  * The Cozir sensor on Streaming mode sends characters as the example: "Z 00026"
  * This function returns the numerical value (int) of the parsed input string
- * The value, when multipled by 100, corrsponds to the CO2 measurement in ppm
+ * sensor_value x 100 = CO2 concentration in ppm
  */
 int parseCozirStream(String input) {
   // Find the position of 'Z' in the input string
   int zPos = input.indexOf('Z');
-  int sensorValue = 0;
+  int sensor_value = 0;
   if (zPos != -1) {
     // Extract the substring starting from 'Z' position
     String numberString = input.substring(zPos + 2);
     numberString.trim();
-    sensorValue = numberString.toInt();
-    return sensorValue;
+    sensor_value = numberString.toInt();
+    return sensor_value;
   }
   // If 'Z' is not found or parsing fails
   return -1;
@@ -150,18 +165,22 @@ int readCozirStream(void){
     if (currentChar == 'Z') {
       for (int i = 0; i < 6; i++) {
         while (!Serial1.available()); // Wait until data available
-        Serial.print(currentChar); // Debug
+        // Serial.print(currentChar); // Debug
         currentChar = Serial1.read();
         result += currentChar;
       }
     }
     k++;
+#ifdef DEBUG_MODE
     Serial.print("\n-->Cozir string read: ");
     Serial.println(result);
+#endif
     sensorValue = parseCozirStream(result);
   }
+#ifdef DEBUG_MODE
   Serial.print("-->Cozir parsed sensor value:");
   Serial.println(sensorValue);
+#endif
   if(sensorValue > 0){
     return sensorValue;
   }
@@ -177,11 +196,12 @@ int readCozirStream(void){
  * CO2 readings after calibration should be around 400 ppm in atmospheric air
  * Must be used with care
  */
-void calibrateCozirDevice(void){
+int calibrateCozirDevice(void){
   czr.setOperatingMode(CZR_POLLING);
-  delay(100);
+  delay(500);
   Serial.println(czr.calibrateFreshAir());
-  delay(100);
+  delay(500);
+  return initCozirDevice();
 }
 
 
@@ -193,24 +213,27 @@ int initCozirDevice(void){
   // In Arduino MKR WiFi 1010, Serial1 uses pins D14(Controller TX) and D13(Controller RX)
   Serial1.begin(38400); // SprintIR-R-100 uses 38400 baud rate - SprintIR-WF-100 uses 9600 baud rate
   czr.init();
-  if(digitalRead(GPIO_SENSOR_CALIBRATION) == LOW){
-    eventHandler(EVENT_CODE_CALIBRATION);
-    calibrateCozirDevice();
-    Serial.println("-->Cozir Start CALIBRATION");
-  }
-
   // Set sensor to STREAMING MODE (continuous write to serial)
   czr.setOperatingMode(CZR_STREAMING);
   // After sending set operating mode the serial hangs - serial listener must detect first Z sent.
-  delay(10);
+  delay(50);
   // Test reading the sensor
   if (readCozirStream() > 0){
-    Serial.println("-->Cozir Start OK");
     return 1;
   }
-  else
-    Serial.println("-->Cozir Start FAILED"); 
-    return 0;
+  else {
+    // Attempt to restart the sensor
+    digitalWrite(GPIO_SENSOR_PWR_CTRL, LOW); // Power off the sensors
+    delay(50);
+    digitalWrite(GPIO_SENSOR_PWR_CTRL, HIGH); // Power on the sensors
+    delay(500);
+    if (readCozirStream() > 0){
+      return 1;
+    }
+    else {
+      return 0;
+    }
+  }
 }
 
 
@@ -228,6 +251,16 @@ int eventHandler(int ev_code){
         digitalWrite(GPIO_LED_RED, HIGH);
         delay(100);
         digitalWrite(GPIO_LED_RED, LOW);
+        delay(100);
+      }
+      break;
+    case EVENT_CODE_STARTUP_ERROR: // LOCK THE CPU
+      for(;;){
+        digitalWrite(GPIO_LED_RED, HIGH);
+        digitalWrite(GPIO_LED_GREEN, LOW);
+        delay(100);
+        digitalWrite(GPIO_LED_RED, LOW);
+        digitalWrite(GPIO_LED_GREEN, HIGH);
         delay(100);
       }
       break;
@@ -303,6 +336,10 @@ void TC3_Handler() {
   digitalWrite(GPIO_LED_GREEN, !digitalRead(GPIO_LED_GREEN)); // Toggle green led
 }
 
+
+/**
+ * PROGRAM SETUP
+ */
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(GPIO_RELAY_1, OUTPUT);
@@ -311,62 +348,63 @@ void setup() {
   pinMode(GPIO_SENSOR_CALIBRATION, INPUT_PULLUP);
   pinMode(GPIO_PWM_MOTOR_1, OUTPUT);
   pinMode(GPIO_SENSOR_PWR_CTRL, OUTPUT);
-
-  eventHandler(EVENT_CODE_SETUP);
-  Serial.println("-->Gas Analyzer Control: SETUP");
   Serial.begin(115200);
-  delay(5000); // REMOVE
+  delay(1000);
+  global_state = FSM_SETUP; // TODO Change global_state to private type (state)
+  eventHandler(EVENT_CODE_SETUP);
+  Serial.print("\n-->Gas Analyzer Control: SETUP");
 
-  eventHandler(EVENT_CODE_CONNECTION);
-  Serial.println("-->Gas Analyzer Control: CONNECTING");
-  relayMotorControl(GPIO_PWM_MOTOR_1, GPIO_RELAY_1, RELAY_CTRL_PWR_ON);
-  pwmMotorCtrl(4, GPIO_PWM_MOTOR_1);
-  delay(3000);
-  pwmMotorCtrl(0, GPIO_PWM_MOTOR_1);
-  delay(3000);
-  pwmMotorCtrl(2, GPIO_PWM_MOTOR_1);
-  delay(3000);
-  pwmMotorCtrl(0, GPIO_PWM_MOTOR_1);
-  delay(3000);
-  //pwmMotorCtrl(0, GPIO_PWM_MOTOR_1);
-  //delay(1000);
-  relayMotorControl(GPIO_PWM_MOTOR_1, GPIO_RELAY_1, RELAY_CTRL_CRIT_SHUT_OFF);
-
-
-  // Initialyze serial for Cozir sensor
   digitalWrite(GPIO_SENSOR_PWR_CTRL, HIGH); // Power on the sensors
-  if (!initCozirDevice()){eventHandler(EVENT_CODE_CRITICAL_ERROR);}
-  
-  Serial.println("-->Gas Analyzer Control: RUNNING");
-  eventHandler(EVENT_CODE_RUNNING);
+  if (!initCozirDevice()){
+    Serial.print("\n-->Gas Analyzer Control: Cozir Start FAILED");
+    eventHandler(EVENT_CODE_STARTUP_ERROR);
+  }
+  if(digitalRead(GPIO_SENSOR_CALIBRATION) == LOW){ // Calibrate sensors
+    eventHandler(EVENT_CODE_CALIBRATION);
+    if (!calibrateCozirDevice()){
+      Serial.print("\n-->Gas Analyzer Control: Cozir Calibration FAILED");
+      eventHandler(EVENT_CODE_STARTUP_ERROR);
+    }
+    else{
+      Serial.print("\n-->Gas Analyzer Control: Cozir Calibration OK");
+      eventHandler(EVENT_CODE_SETUP); // Resume setup
+    }
+  }
+  Serial.print("\n-->Gas Analyzer Control: Cozir Start OK");
+
+  // Connect the relay on the motors
+  pwmMotorCtrl(PWM_CTRL_POWER_0, GPIO_PWM_MOTOR_1); // Start with motor 1 off
+  relayMotorCtrl(GPIO_PWM_MOTOR_1, GPIO_RELAY_1, RELAY_CTRL_PWR_ON);
+  Serial.print("\n-->Gas Analyzer Control: Relay UP n. ");
+  Serial.print(GPIO_RELAY_1);
+
+
   // check for the WiFi module:
   if (WiFi.status() == WL_NO_MODULE) {
-    Serial.println("Communication with WiFi module failed!");
-    eventHandler(EVENT_CODE_CRITICAL_ERROR);
+    Serial.print("\n-->Gas Analyzer WiFi: Communication with WiFi module FAILED");
+    eventHandler(EVENT_CODE_STARTUP_ERROR);
     // don't continue
   }
 
   String fv = WiFi.firmwareVersion();
   if (fv < WIFI_FIRMWARE_LATEST_VERSION) {
-    Serial.println("Please upgrade the firmware");
+    Serial.print("\n-->Gas Analyzer WiFi: Firmware update needed. Current FW: ");
+    Serial.print(WIFI_FIRMWARE_LATEST_VERSION);
   }
 
-  // by default the local IP address will be 192.168.4.1
-  // you can override it with the following:
-  // WiFi.config(IPAddress(10, 0, 0, 1));
-
+  WiFi.config(IPAddress(10, 0, 0, 1));
+  eventHandler(EVENT_CODE_CONNECTION);
   // print the network name (SSID);
-  Serial.print("Creating access point named: ");
-  Serial.println(ssid);
+  Serial.print("\n-->Gas Analyzer WiFi: Creating access point named: ");
+  Serial.print(ssid);
 
   // Create open network. Change this line if you want to create an WEP network:
   statusWiFi = WiFi.beginAP(ssid, pass);
   if (statusWiFi != WL_AP_LISTENING) {
-    Serial.println("Creating access point failed");
-    // don't continue
-    while (true);
+    Serial.print("\n-->Gas Analyzer WiFi: Creating access point FAILED");
+    eventHandler(EVENT_CODE_STARTUP_ERROR);
   }
-
+  Serial.print("\n-->Gas Analyzer WiFi: Creating access point OK");
   // wait 10??? seconds for connection:
   delay(5000);
   // start the web server on port 80
@@ -377,9 +415,11 @@ void setup() {
 }
 
 
-
 void loop() {
-
+  if(global_state == FSM_SETUP){
+    global_state = FSM_AP_SERVER; // update state
+    eventHandler(EVENT_CODE_RUNNING);
+  }
   // compare the previous statusWiFi to the current status
   if (statusWiFi != WiFi.status()) {
     // it has changed update the variable
@@ -416,8 +456,11 @@ void loop() {
             client.println();
 
             // the content of the HTTP response follows the header:
-            client.print("Click <a href=\"/H\">here</a> turn the LED on<br>");
-            client.print("Click <a href=\"/L\">here</a> turn the LED off<br>");
+            //client.print("Click <a href=\"/H\">here</a> turn the LED on<br>");
+            //client.print("Click <a href=\"/L\">here</a> turn the LED off<br>");
+            client.print("<p style='font-size:48px; margin-bottom:20px;'>Click <a href=\"/H\">here</a> to turn the motor ON on</p>");
+            client.print("<p style='font-size:48px;'>Click <a href=\"/L\">here</a> to turn the motor OFF off</p>");
+
 
             // The HTTP response ends with another blank line:
             client.println();
@@ -434,10 +477,12 @@ void loop() {
 
         // Check to see if the client request was "GET /H" or "GET /L":
         if (currentLine.endsWith("GET /H")) {
-          digitalWrite(LED_BUILTIN, HIGH);               // GET /H turns the LED on
+          //digitalWrite(LED_BUILTIN, HIGH);               // GET /H turns the LED on
+          pwmMotorCtrl(PWM_CTRL_POWER_2, GPIO_PWM_MOTOR_1);
         }
         if (currentLine.endsWith("GET /L")) {
-          digitalWrite(LED_BUILTIN, LOW);                // GET /L turns the LED off
+          //digitalWrite(LED_BUILTIN, LOW);                // GET /L turns the LED off
+          pwmMotorCtrl(PWM_CTRL_POWER_0, GPIO_PWM_MOTOR_1);
         }
       }
     }
@@ -449,7 +494,7 @@ void loop() {
 
 void printWiFiStatus() {
   // print the SSID of the network you're attached to:
-  Serial.print("SSID: ");
+  Serial.print("\nSSID: ");
   Serial.println(WiFi.SSID());
 
   // print your WiFi shield's IP address:
