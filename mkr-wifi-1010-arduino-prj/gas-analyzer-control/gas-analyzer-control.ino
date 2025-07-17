@@ -8,6 +8,9 @@
 #include <cozir.h>
 
 /* DEFINES */
+#define SW_VERSION "gas-analyzer-control-v0.1"
+#define SW_DATE "July 2025"
+
 #define AP_SSID "GAS_ANALYZER"
 #define AP_PASS "gamkr1010"
 
@@ -53,20 +56,24 @@ char pass[] = AP_PASS;  // Network password (use for WPA, or use as key for WEP)
 int keyIndex = 0;       // Network key index number (needed only for WEP)
 
 COZIR czr(&Serial1);  // CO2 sensor handler
-float read_co2=0;     // CO2 reading (in %)
+// float read_co2=0;     // CO2 reading (in %)
 
 int statusWiFi = WL_IDLE_STATUS;
 WiFiServer server(80);
 WiFiClient client;
 
-float global_co2 = 0;
-float global_o2 = 0;
+float global_co2 = 0; // CO2 last reading (in %)
+float global_o2 = 0;  // O2 last reading (in %)
+float global_gas_temp = 0; // Gas temperature (in deg. Celsius)
+float global_gas_press = 0; // Gas temperature (in mbar)
+float global_motor_1_pwr = 0; // Current power for motor 1 (in %)
 
 /* PFD */
 int parseCozirStream(String input);
 int readCozirStream(void);
 int initCozirDevice(void);
 int calibrateCozirDevice(void);
+void updatePowerMotorCtrl(int pwr_config, int motor_ctrl_pin);
 void pwmMotorCtrl(int div, int motor_ctrl_pin);
 void relayMotorCtrl(int motor_ctrl_pin, int relay_pin, int op);
 void handleRoot(WiFiClient &client);
@@ -76,6 +83,24 @@ void handleNotFound(WiFiClient &client);
 void printWiFiStatus(void);
 
 /* PF */
+
+/**
+ * Function for updating the status of a motor (what is the current power setup)
+ * pwr_config: PWM power configuration
+ * motor_ctrl_pin: GPIO of the motor
+ */
+void updatePowerMotorCtrl(int pwr_config, int motor_ctrl_pin){
+  if(motor_ctrl_pin == GPIO_PWM_MOTOR_1){
+    if(pwr_config <= 0){
+      global_motor_1_pwr = 0; // Motor is off
+    }
+    else{
+      global_motor_1_pwr = 100 / pwr_config; // Calculate power given to the motor
+    }
+  }
+}
+
+
 /**
  * Control function for PWM for connected motors
  * div: duty cycle division (e.g. div=4, output avg_voltage = max_voltage/4)
@@ -89,6 +114,7 @@ void pwmMotorCtrl(int div, int motor_ctrl_pin){
   else{
     analogWrite(motor_ctrl_pin, 255 / div); // Setup PWM
   }
+  updatePowerMotorCtrl(div, motor_ctrl_pin); // Update the global with the new power
 }
 
 
@@ -360,6 +386,8 @@ void setup() {
   delay(1000);
   global_state = FSM_SETUP; // TODO Change global_state to private type (state)
   eventHandler(EVENT_CODE_SETUP);
+  Serial.print("\n-->Software Version: ");
+  Serial.print(SW_VERSION);
   Serial.print("\n-->Gas Analyzer Control: SETUP");
 
   digitalWrite(GPIO_SENSOR_PWR_CTRL, HIGH); // Power on the sensors
@@ -402,27 +430,27 @@ void setup() {
 
   WiFi.config(IPAddress(10, 0, 0, 1));
   eventHandler(EVENT_CODE_CONNECTION);
-  // print the network name (SSID);
   Serial.print("\n-->Gas Analyzer WiFi: Creating access point named: ");
   Serial.print(ssid);
 
-  // Create open network. Change this line if you want to create an WEP network:
+  // Create open network:
   statusWiFi = WiFi.beginAP(ssid, pass);
   if (statusWiFi != WL_AP_LISTENING) {
     Serial.print("\n-->Gas Analyzer WiFi: Creating access point FAILED");
     eventHandler(EVENT_CODE_STARTUP_ERROR);
   }
   Serial.print("\n-->Gas Analyzer WiFi: Creating access point OK");
-  // wait 10??? seconds for connection:
+  // wait for connection:
   delay(5000);
   // start the web server on port 80
   server.begin();
-
-  // you're connected now, so print out the status
   printWiFiStatus();
 }
 
 
+/**
+ * PROGRAM LOOP
+ */
 void loop() {
   if(global_state == FSM_SETUP){
     global_state = FSM_AP_SERVER; // update state
@@ -430,7 +458,7 @@ void loop() {
   }
   client = server.available();
   if (client) {
-    Serial.println("Client connected");
+    // Serial.println("Client connected");
     String req = "";
     while (client.connected()) {
       if (client.available()) {
@@ -448,6 +476,9 @@ void loop() {
     }
     else if (req.indexOf("GET /data") >= 0) {
       handleSensorData(client);
+    }
+    else if (req.indexOf("GET /sensor_values") >= 0) {
+      handleSensorValues(client);
     }
     else if (req.indexOf("GET /control") >= 0) {
       handleMotorCtrl(client);
@@ -475,15 +506,18 @@ void loop() {
     else {
       handleNotFound(client);
     }
+
     delay(1);
     global_co2 += 0.1; // REMOVE
     global_o2 += 0.1;  // REMOVE
+    global_gas_press += 10;
+    global_gas_temp += 1;
     client.stop();
   }
 }
 
 /**
- *
+ * HTML handlers
  *
  */
 void handleRoot(WiFiClient &client) {
@@ -492,7 +526,7 @@ void handleRoot(WiFiClient &client) {
   client.println();
   client.println("<!DOCTYPE html><html><body>");
 
-  client.println("<h2 style='font-size:48px; margin-bottom:20px;'>Welcome to MKR Web Server</h2>");
+  client.println("<h2 style='font-size:48px; margin-bottom:20px;'>GAS ANALYZER CONTROL PANEL</h2>");
 
   client.println("<a href=\"/data\" style='"
                  "display:inline-block; "
@@ -502,7 +536,7 @@ void handleRoot(WiFiClient &client) {
                  "background-color:#4CAF50; "
                  "color:white; "
                  "text-decoration:none; "
-                 "border-radius:10px;'>View Sensor Data</a><br>");
+                 "border-radius:10px;'>SENSOR DATA</a><br>");
 
   client.println("<a href=\"/control\" style='"
                  "display:inline-block; "
@@ -512,41 +546,152 @@ void handleRoot(WiFiClient &client) {
                  "background-color:#2196F3; "
                  "color:white; "
                  "text-decoration:none; "
-                 "border-radius:10px;'>Toggle Motor</a>");
+                 "border-radius:10px;'>MOTOR CONTROL</a>");
+
+  client.print("<p style='font-size:24px; margin-top:80px;'>Software Version: ");
+  client.print(SW_VERSION);
+  client.println("</p>");
+  client.print("<p style='font-size:24px; margin-top:20px;'>Last update: ");
+  client.print(SW_DATE);
+  client.println("</p>");
 
   client.println("</body></html>");
+}
+
+void handleSensorValues(WiFiClient &client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: application/json");
+  client.println("Access-Control-Allow-Origin: *");
+  client.println();
+
+  client.print("{\"co2\":");
+  client.print(global_co2);
+  client.print(",\"o2\":");
+  client.print(global_o2);
+  client.print(",\"gasTemp\":");
+  client.print(global_gas_temp);
+  client.print(",\"gasPress\":");
+  client.print(global_gas_press);
+  client.println("}");
 }
 
 void handleSensorData(WiFiClient &client) {
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: text/html");
   client.println();
-  client.println("<!DOCTYPE html><html><body>");
-  client.println("<h2>Sensor Data</h2>");
-  client.print("<p>CO2: ");
-  client.print(global_co2);
-  client.println(" %</p>");
-  client.print("<p> O2: ");
-  client.print(global_o2);
-  client.println(" %</p>");
-  client.println("<p><a href=\"/\">&#8592; Back to Home</a></p>");
+  client.println("<!DOCTYPE html><html><head>");
+  client.println("<meta charset='UTF-8'>");
+  client.println("<title>Sensor Data</title>");
+  client.println("<script>");
+  client.println("function updateSensorData() {");
+  client.println("  fetch('/sensor_values')");
+  client.println("    .then(response => response.json())");
+  client.println("    .then(data => {");
+  client.println("      document.getElementById('co2').innerText = data.co2 + ' %';");
+  client.println("      document.getElementById('o2').innerText = data.o2 + ' %';");
+  client.println("      document.getElementById('gasTemp').innerText = data.gasTemp + ' °C';");
+  client.println("      document.getElementById('gasPress').innerText = data.gasPress + ' mbar';");
+  client.println("    });");
+  client.println("}");
+  client.println("setInterval(updateSensorData, 1000);");
+  client.println("</script>");
+  client.println("</head><body>");
+
+  client.println("<h2 style='font-size:48px; margin-bottom:30px;'>SENSOR DATA</h2>");
+
+  client.println("<p style='font-size:48px; margin-top:40px; margin-bottom:20px;'>CO2: <span id='co2'>--</span></p>");
+  client.println("<p style='font-size:48px; margin-bottom:30px;'>O2: <span id='o2'>--</span></p>");
+  client.println("<p style='font-size:48px; margin-bottom:30px;'>Gas Temperature: <span id='gasTemp'>--</span></p>");
+  client.println("<p style='font-size:48px; margin-bottom:30px;'>Gas Pressure: <span id='gasPress'>--</span></p>");
+
+  client.println("<a href=\"/\" style='"
+                 "display:inline-block; "
+                 "font-size:48px; "
+                 "padding:20px 40px; "
+                 "margin-top:20px; "
+                 "background-color:#555; "
+                 "color:white; "
+                 "text-decoration:none; "
+                 "border-radius:10px;'>"
+                 "&#8592; Back to Home</a>");
+
   client.println("</body></html>");
 }
 
+
 void handleMotorCtrl(WiFiClient &client) {
+  int round_motor_1_pwr = global_motor_1_pwr;
   client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: text/html");
   client.println();
   client.println("<!DOCTYPE html><html><body>");
 
-  client.println("<h2 style='font-size:48px; margin-bottom:20px;'>MOTOR CONTROL</h2>");
+  client.println("<h2 style='font-size:48px; margin-bottom:30px;'>MOTOR CONTROL</h2>");
 
-  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/m1p00\">MOTOR1 OFF</a></p>");
-  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/m1pff\">MOTOR1 TO 100% PWR</a></p>");
-  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/m1p50\">MOTOR1 TO 50% PWR</a></p>");
-  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/m1p20\">MOTOR1 TO 20% PWR</a></p>");
-  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/m1p10\">MOTOR1 TO 10% PWR</a></p>");
-  client.println("<p style='font-size:48px; margin-bottom:20px;'><a href=\"/\">&#8592; Back to Home</a></p>");
+  client.print("<p style='font-size:48px; margin-bottom:30px;'>MOTOR1 AT [");
+  client.print(round_motor_1_pwr);
+  client.println("%] PWR</p>");
+
+  client.println("<a href=\"/m1p00\" style='"
+                 "display:inline-block; "
+                 "font-size:48px; "
+                 "margin-bottom:20px; "
+                 "padding:20px 40px; "
+                 "background-color:#2196F3; "  // blue
+                 "color:white; "
+                 "text-decoration:none; "
+                 "border-radius:10px;'>MOTOR1 OFF</a><br>");
+
+  client.println("<a href=\"/m1pff\" style='"
+                 "display:inline-block; "
+                 "font-size:48px; "
+                 "margin-bottom:20px; "
+                 "padding:20px 40px; "
+                 "background-color:#f44336; "  // red
+                 "color:white; "
+                 "text-decoration:none; "
+                 "border-radius:10px;'>MOTOR1 TO 100%  PWR</a><br>");
+
+  client.println("<a href=\"/m1p50\" style='"
+                 "display:inline-block; "
+                 "font-size:48px; "
+                 "margin-bottom:20px; "
+                 "padding:20px 40px; "
+                 "background-color:#FF9800; "  // orange
+                 "color:white; "
+                 "text-decoration:none; "
+                 "border-radius:10px;'>MOTOR1 TO 50%  PWR</a><br>");
+
+  client.println("<a href=\"/m1p20\" style='"
+                 "display:inline-block; "
+                 "font-size:48px; "
+                 "margin-bottom:20px; "
+                 "padding:20px 40px; "
+                 "background-color:#FFB86F; "  // light orange
+                 "color:white; "
+                 "text-decoration:none; "
+                 "border-radius:10px;'>MOTOR1 TO 20%  PWR</a><br>");
+
+  client.println("<a href=\"/m1p10\" style='"
+                 "display:inline-block; "
+                 "font-size:48px; "
+                 "margin-bottom:20px; "
+                 "padding:20px 40px; "
+                 "background-color:#E0CA3C; "  // yellow
+                 "color:white; "
+                 "text-decoration:none; "
+                 "border-radius:10px;'>MOTOR1 TO 10%  PWR</a><br>");
+
+  client.println("<a href=\"/\" style='"
+                 "display:inline-block; "
+                 "font-size:48px; "
+                 "margin-top:40px; "
+                 "padding:20px 40px; "
+                 "background-color:#555; "
+                 "color:white; "
+                 "text-decoration:none; "
+                 "border-radius:10px;'>"
+                 "&#8592; Back to Home</a>");
 
   client.println("</body></html>");
 }
