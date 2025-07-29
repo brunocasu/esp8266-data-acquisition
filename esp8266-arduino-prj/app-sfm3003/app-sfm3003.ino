@@ -5,6 +5,9 @@
 
 #include <Wire.h>
 #include <PolledTimeout.h>
+#include <ESP8266WiFi.h>
+#include <ESPAsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 
 /* USER IMPLEMENTED START */
 #define SDA_PIN 4 // D1 Mini pin function D2
@@ -16,6 +19,20 @@
 #define SFM3003_SERIAL_NUMBER_SIZE    8
 #define MEASUREMENT_INTERVAL_MS       1000
 
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+const char* ap_ssid = "FLOW_V1";
+const char* ap_password = "flowapv1";
+IPAddress local_IP(10, 0, 0, 1);
+IPAddress gateway(10, 0, 0, 1);
+IPAddress subnet(255, 255, 255, 0);
+const int DATA_SIZE = 30;
+float flowData[DATA_SIZE] = {0};
+float temperatureData[DATA_SIZE] = {0};
+int dataIndex = 0;
+unsigned long lastMeasure = 0;
+float newFlow;
+float newTemp;
 
 const uint16_t I2C_MASTER_ADDR = 0x42;
 const uint16_t I2C_SLAVE_ADDR = 0x28; // SFM3003-300-CL Address
@@ -239,24 +256,122 @@ void data_acquisition(void){
   Serial.print(temp);
   Serial.print("; ");
   Serial.print(millis());
-  
+  // update globals
+  newFlow = flow;
+  newTemp = temp;
 }
 
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>ESP8266 Live Data</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { text-align: center; font-family: Arial; margin: 20px; }
+    canvas { width: 100%; max-width: 800px; height: 400px; margin-top: 20px; }
+    .info { margin-bottom: 20px; font-size: 1.4em; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h2>Gas Flow Monitor</h2>
+  <div class="info">
+    Latest Flow: <span id="flow">0</span> SLM &nbsp;|&nbsp;
+    Temperature: <span id="temp">0</span> °C
+  </div>
+  <canvas id="chart"></canvas>
+  <script>
+    const ctx = document.getElementById('chart').getContext('2d');
+    let flowData = new Array(30).fill(0);
+    let chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: Array.from({length: 30}, (_, i) => i - 29),
+        datasets: [{
+          label: 'Gas Flow (SLM)',
+          data: flowData,
+          borderColor: 'blue',
+          backgroundColor: 'rgba(173, 216, 230, 0.4)',
+          fill: true,
+          tension: 0.2
+        }]
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        scales: {
+          x: { title: { display: true, text: 'Seconds ago' } },
+          y: { beginAtZero: true }
+        },
+        plugins: {
+          legend: { display: true, labels: { font: { size: 14 } } }
+        }
+      }
+    });
+
+    const ws = new WebSocket(`ws://${window.location.host}/ws`);
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      document.getElementById('flow').textContent = data.flow.toFixed(1);
+      document.getElementById('temp').textContent = data.temperature.toFixed(1);
+      flowData = data.flowData;
+      chart.data.datasets[0].data = flowData;
+      chart.update();
+    };
+  </script>
+</body>
+</html>
+)rawliteral";
+
+void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    //Serial.print("\n-->WebSocket client connected");
+  }
+}
 
 void setup() {
-  Serial.begin(115200);                      // start serial for output
+  Serial.begin(115200);                           // start serial for output
   Wire.begin(SDA_PIN, SCL_PIN, I2C_MASTER_ADDR);  // join i2c bus (address optional for master)
   delay(100);
   Serial.print("\n\n-->SFM3003 driver begin");
   Serial.print("\n-->SFM3003 device at I2C addr: ");
   Serial.println(I2C_SLAVE_ADDR, HEX);
   init_sfm3003_300_cl();
-  delay(100);
+  WiFi.softAPConfig(local_IP, gateway, subnet);
+  WiFi.softAP(ap_ssid, ap_password);
+  Serial.print("\n-->WIFI AP AT: ");
+  Serial.print(WiFi.softAPIP());
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html);
+  });
+  ws.onEvent(onWsEvent);
+  server.addHandler(&ws);
+  server.begin();
+
 }
 
 
 void loop() {
-  data_acquisition();
-  delay(MEASUREMENT_INTERVAL_MS);
+  if (millis() - lastMeasure >= MEASUREMENT_INTERVAL_MS) {
+    lastMeasure = millis();
 
+    data_acquisition();
+
+    flowData[dataIndex] = newFlow;
+    temperatureData[dataIndex] = newTemp;
+    dataIndex = (dataIndex + 1) % DATA_SIZE;
+
+    // JSON response
+    String json = "{\"flow\":" + String(newFlow) +
+                  ",\"temperature\":" + String(newTemp) +
+                  ",\"flowData\":[";
+    for (int i = 0; i < DATA_SIZE; i++) {
+      json += String(flowData[(dataIndex + i) % DATA_SIZE]);
+      if (i < DATA_SIZE - 1) json += ",";
+    }
+    json += "]}";
+
+    ws.textAll(json);
+  }
 }
