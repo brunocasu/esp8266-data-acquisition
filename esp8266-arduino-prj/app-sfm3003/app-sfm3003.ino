@@ -1,24 +1,24 @@
-// Wire Master Reader
-// by devyte
-// based on the example of the same name by Nicholas Zambetti <http://www.zambetti.com>
+// Driver for the Sensirion SFM3003 Sensor
 
-// Demonstrates use of the Wire library
-// Reads data from an I2C/TWI slave device
-// Refer to the "Wire Slave Sender" example for use with this
-
-// This example code is in the public domain.
+// Author: Bruno Casu
 
 
 #include <Wire.h>
 #include <PolledTimeout.h>
 
+/* USER IMPLEMENTED START */
 #define SDA_PIN 4 // D1 Mini pin function D2
 #define SCL_PIN 5 // D1 Mini pin function D1
-#define CONTINUOUS_MEASURE_BUFF_SIZE  9
+
+// Driver implemented
+#define SFM3003_CONT_MEAS_BUFF_SIZE   9
+#define SFM3003_PRODUCT_ID_SIZE       4
+#define SFM3003_SERIAL_NUMBER_SIZE    8
+#define MEASUREMENT_INTERVAL_MS       1000
 
 
 const uint16_t I2C_MASTER_ADDR = 0x42;
-const uint16_t I2C_SLAVE_ADDR = 0x28; //SFM3003-300-CL Address
+const uint16_t I2C_SLAVE_ADDR = 0x28; // SFM3003-300-CL Address
 // Commands (Cmd[15:0])
 const uint16_t SFM3003_CMD_START_CONT_MEASURE_AIR = 0x3608;
 const uint16_t SFM3003_CMD_START_CONT_MEASURE_02  = 0x3603;
@@ -33,12 +33,28 @@ const uint16_t SFM3003_CMD_ENTER_SLEEP_MODE       = 0x3677;
 const uint16_t SFM3003_CMD_EXIT_SLEEP_MODE        = 0x0000;
 const uint16_t SFM3003_CMD_READ_PROODUCT_ID       = 0xE102;
 // SFM3003-300-CL product id number
-const uint32_t SFM3003_PRODUCT_ID = 0x04020110;  
+const uint32_t SFM3003_300_CL_PRODUCT_ID = 0x04020110;
+const uint32_t SFM3003_300_CE_PRODUCT_ID = 0x04020710;
+
+enum Sfm3003Ctrl {
+    I2C_ERROR = 0,
+    I2C_SHORT_RESPONSE,
+    CRC_ERROR,
+    BUFFER_SIZE_ERROR,
+    SFM3003_300_CL_ID,
+    SFM3003_300_CE_ID,
+    ID_ERROR,
+    CMD_OK
+};
 
 uint8_t calculateCRC8(const uint8_t *data, size_t len);
 bool checkCRC8(const uint8_t *data, size_t len, uint8_t tx_crc);
-void sfm3003_send_cmd(uint16_t cmd, uint8_t *argument);
-size_t sfm3003_read_response(uint8_t * buff, size_t len);
+Sfm3003Ctrl sfm3003comm_send_cmd(uint16_t cmd, uint8_t *argument);
+Sfm3003Ctrl sfm3003comm_read_response(uint8_t * buff, size_t len);
+Sfm3003Ctrl sfm3003cmd_read_product_id(uint8_t *id, size_t id_len, uint8_t *serial_number, size_t sn_len);
+Sfm3003Ctrl sfm3003cmd_check_product_id(uint8_t *id);
+Sfm3003Ctrl sfm3003cmd_stop_continuous_measure(void);
+Sfm3003Ctrl sfm3003cmd_start_continuous_measure_air(float *flow, float *temp, uint16_t *status_word);
 
 bool checkCRC8(const uint8_t *data, size_t len, uint8_t tx_crc) {
     uint8_t crc = calculateCRC8(data, len);
@@ -46,12 +62,11 @@ bool checkCRC8(const uint8_t *data, size_t len, uint8_t tx_crc) {
 }
 
 uint8_t calculateCRC8(const uint8_t *data, size_t len){
-    uint8_t crc = 0x00;          // Initial value
-    uint8_t polynomial = 0x07;   // CRC-8 polynomial
-
+    uint8_t crc = 0xFF;          // Initial value
+    uint8_t polynomial = 0x31;   // CRC-8 polynomial
     for (size_t i = 0; i < len; i++) {
         crc ^= data[i];  // XOR byte into crc
-
+        //Serial.printf("%02x", data[i]); // Debug
         for (uint8_t j = 0; j < 8; j++) {
             if (crc & 0x80) {
                 crc = (crc << 1) ^ polynomial;
@@ -63,7 +78,7 @@ uint8_t calculateCRC8(const uint8_t *data, size_t len){
     return crc;
 }
 
-void sfm3003_send_cmd(uint16_t cmd, uint8_t *argument){
+Sfm3003Ctrl sfm3003comm_send_cmd(uint16_t cmd, uint8_t *argument){
   uint8_t buff[5];
   buff[0] = uint8_t ((cmd & 0xFF00) >> 8); // cmd msb
   buff[1] = uint8_t (cmd & 0x00FF);         // cmd lsb
@@ -79,46 +94,169 @@ void sfm3003_send_cmd(uint16_t cmd, uint8_t *argument){
     }
   }                   
   Wire.endTransmission();
+  return CMD_OK;
 }
 
-size_t sfm3003_read_response(uint8_t * buff, size_t len){
+Sfm3003Ctrl sfm3003comm_read_response(uint8_t * buff, size_t len){
   size_t k = 0, crc_count = 0;
+  bool crc_check;
   Wire.requestFrom(I2C_SLAVE_ADDR, len);
-  
-  while (Wire.available() && k<len) {// slave may send less than requested
-    buff[k] = Wire.read();    
-    Serial.printf("%02x", buff[k]);
-    if(crc_count = 2){ // crc is transmitted after 2 data bytes
-      if(!checkCRC8(&buff[k-2], 2, buff[k])){
-        //Serial.print("\n-->SFM3003 ERROR read response crc check failed");
-        //return 0;
+  if (!Wire.available()){return I2C_ERROR;}
+  while (Wire.available() && k<len) { // slave may send less than requested
+    buff[k] = Wire.read();
+    if(crc_count == 2){ // crc is transmitted after 2 data bytes
+      crc_check = checkCRC8(&buff[k-2], 2, buff[k]);
+      if(!crc_check){
+        return CRC_ERROR;
       }
       crc_count = 0;
     }
+    else {
+      crc_count++;
+    }
     k++;
-    crc_count++;
   }
-  return k; // return number of bytes read
+  if (k < len) {return I2C_SHORT_RESPONSE;}
+  else {
+    return CMD_OK;
+  }
 }
+
+Sfm3003Ctrl sfm3003cmd_read_product_id(uint8_t *id, size_t id_len, uint8_t *serial_number, size_t sn_len){
+  size_t len = 18;
+  uint8_t buff[len];
+  int buff_count=0;
+  Sfm3003Ctrl ret_val;
+  if (id_len != SFM3003_PRODUCT_ID_SIZE || sn_len != SFM3003_SERIAL_NUMBER_SIZE) {
+    return BUFFER_SIZE_ERROR;
+  }
+  ret_val = sfm3003comm_send_cmd(SFM3003_CMD_READ_PROODUCT_ID, NULL);
+  if (ret_val != CMD_OK) {return ret_val;}
+  ret_val = sfm3003comm_read_response(buff, len);
+  if (ret_val != CMD_OK) {return ret_val;}
+  for (int i=0;i<SFM3003_PRODUCT_ID_SIZE;i++){
+    buff_count++;
+    if (buff_count%3 == 0 && buff_count>0){ // skip crc value
+      buff_count++;
+    }
+    id[i] = buff[buff_count-1];
+  }
+  for (int n=0;n<SFM3003_SERIAL_NUMBER_SIZE;n++){
+    buff_count++;
+    if (buff_count%3 == 0 && buff_count>0){ // skip crc value
+      buff_count++;
+    }
+    serial_number[n] = buff[buff_count-1];
+  }
+  return CMD_OK;
+}
+
+Sfm3003Ctrl sfm3003cmd_check_product_id(uint8_t *id){
+    uint32_t idValue = 
+        ((uint32_t)id[0] << 24) | 
+        ((uint32_t)id[1] << 16) | 
+        ((uint32_t)id[2] << 8)  | 
+        ((uint32_t)id[3]);
+
+    if (idValue == SFM3003_300_CL_PRODUCT_ID){
+      return SFM3003_300_CL_ID;
+    }
+    else if (idValue == SFM3003_300_CE_PRODUCT_ID){
+      return SFM3003_300_CE_ID;
+    }
+    else {
+      return ID_ERROR;
+    }
+}
+
+// When the sensor is in continuous measurement mode, 
+// the sensor must be stopped before it can accept another
+// command.
+Sfm3003Ctrl sfm3003cmd_stop_continuous_measure(void){
+  Sfm3003Ctrl ret_val = sfm3003comm_send_cmd(SFM3003_CMD_STOP_CONT_MEASURE, NULL);
+  delay(10);
+  return ret_val; 
+}
+
+Sfm3003Ctrl sfm3003cmd_start_continuous_measure_air(float *flow, float *temp, uint16_t *status_word){
+  size_t len = 9;
+  int16_t read_flow=0, read_temp=0;
+  uint8_t buff[len]; // SFM3003_CONT_MEAS_BUFF_SIZE
+  Sfm3003Ctrl ret_val;
+  ret_val = sfm3003comm_send_cmd(SFM3003_CMD_START_CONT_MEASURE_AIR, NULL);
+  delay(100);
+  if (ret_val != CMD_OK) {
+    // Serial.print("\n\n-->SFM3003 SEND error: "); // debug
+    return ret_val;
+  }
+  ret_val = sfm3003comm_read_response(buff, len);
+  if (ret_val != CMD_OK) {
+    // Serial.print("\n\n-->SFM3003 READ error: "); // debug
+    return ret_val;
+  }
+  read_flow = (int16_t)((buff[0] << 8) | buff[1]);
+  *flow = (read_flow + 24576.0f) / 170.0f;
+  read_temp = (int16_t)((buff[3] << 8) | buff[4]);
+  *temp = (read_temp + 0) / 200.0f;
+  *status_word = ((uint16_t)buff[6] << 8) | buff[7];
+  return CMD_OK;
+}
+
+
+/* USER IMPLEMENTED FUNCTIONS */
+void init_sfm3003_300_cl(void){
+  uint8_t id[SFM3003_PRODUCT_ID_SIZE], serial_number[SFM3003_SERIAL_NUMBER_SIZE];
+  Sfm3003Ctrl read_status, id_status;
+  sfm3003cmd_stop_continuous_measure();
+  read_status = sfm3003cmd_read_product_id(id, SFM3003_PRODUCT_ID_SIZE, serial_number, SFM3003_SERIAL_NUMBER_SIZE);
+  id_status = sfm3003cmd_check_product_id(id);
+  if (read_status == CMD_OK && id_status == SFM3003_300_CL_ID){
+    Serial.print("\n-->SFM3003 init - found SFM3003 300 CL device");
+    Serial.print("\n-->SFM3003 init - product id: ");
+    for (int i=0; i<SFM3003_PRODUCT_ID_SIZE; i++){Serial.printf("%02x", id[i]);}
+    Serial.print("\n-->SFM3003 init - serial number: ");
+    for (int i=0; i<SFM3003_SERIAL_NUMBER_SIZE; i++){Serial.printf("%02x", serial_number[i]);}
+    Serial.print("\n-->SFM3003 init - measurements: gas flow; temperature; run time");
+    Serial.print("\n-->SFM3003 init - measurement units: [slm]; [°C]; [ms]) ");
+  }
+  else{
+    Serial.print("\n-->SFM3003 init error: ");
+    Serial.print(read_status);
+    Serial.print(id_status);
+  }
+}
+
+void data_acquisition(void){
+  float flow=0, temp=0;
+  uint16_t status_word=0;
+  //init_sfm3003_300_cl();
+  sfm3003cmd_start_continuous_measure_air(&flow, &temp, &status_word);
+  delay(100);
+  sfm3003cmd_stop_continuous_measure();
+  Serial.print("\n-->SFM3003 readings: ");
+  Serial.print(flow);
+  Serial.print("; ");
+  Serial.print(temp);
+  Serial.print("; ");
+  Serial.print(millis());
+  
+}
+
 
 void setup() {
   Serial.begin(115200);                      // start serial for output
   Wire.begin(SDA_PIN, SCL_PIN, I2C_MASTER_ADDR);  // join i2c bus (address optional for master)
   delay(100);
-  Serial.print("\n-->SFM3003 driver begin");
+  Serial.print("\n\n-->SFM3003 driver begin");
   Serial.print("\n-->SFM3003 device at I2C addr: ");
   Serial.println(I2C_SLAVE_ADDR, HEX);
+  init_sfm3003_300_cl();
+  delay(100);
 }
 
-void loop() {
-  uint8_t buff[18];
-  int count;
-  Serial.print("\n-->SFM3003 read product id: ");
-  sfm3003_send_cmd(SFM3003_CMD_READ_PROODUCT_ID, NULL);
-  count = sfm3003_read_response(buff, 18);
-  Serial.print("\n-->SFM3003 read count: ");
-  Serial.print(count);
 
-  delay(3000);
+void loop() {
+  data_acquisition();
+  delay(MEASUREMENT_INTERVAL_MS);
 
 }
