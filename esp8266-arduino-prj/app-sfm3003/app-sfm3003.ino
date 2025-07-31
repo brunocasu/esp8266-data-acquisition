@@ -1,6 +1,22 @@
-// Driver for the Sensirion SFM3003 Sensor
-
-// Author: Bruno Casu
+/*
+ * app-sfm3003.ino
+ *
+ * This program is free software: you can redistribute it and/or modify it under the terms of the
+ * GNU General Public License as published by the Free Software Foundation, either version 3 of
+ * the License, or any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
+ * even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+ * Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with this program. If not,
+ * see <https://www.gnu.org/licenses/>.
+ *
+ *  Created on: July 30, 2025
+ *      Author: Bruno Casu
+ *
+ *  Version 1.0 (July 31, 2025)
+ */
 
 
 #include <Wire.h>
@@ -8,10 +24,13 @@
 #include <ESP8266WiFi.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <LittleFS.h>
+#include <SimpleFTPServer.h>
 
 /* USER IMPLEMENTED START */
 #define SDA_PIN 4 // D1 Mini pin function D2
 #define SCL_PIN 5 // D1 Mini pin function D1
+#define GPIO_SET_ACCESS_POINT 14 // D1 Mini pin function D5
 
 // Driver implemented
 #define SFM3003_CONT_MEAS_BUFF_SIZE   9
@@ -33,6 +52,15 @@ int dataIndex = 0;
 unsigned long lastMeasure = 0;
 float newFlow;
 float newTemp;
+
+FSInfo fs_info;
+const char* data_file_path = "/FLOW1_data.csv";
+const char* csv_header_description = "FLOW(slm);TEMP(C);EX_TIME(ms)";
+
+// FTP server access configuration
+const char* user_FTP = "esp8266";
+const char* pwd_FTP = "esp8266";
+FtpServer ftpSrv; // Handler
 
 const uint16_t I2C_MASTER_ADDR = 0x42;
 const uint16_t I2C_SLAVE_ADDR = 0x28; // SFM3003-300-CL Address
@@ -259,6 +287,20 @@ void data_acquisition(void){
   // update globals
   newFlow = flow;
   newTemp = temp;
+
+  if (LittleFS.exists(data_file_path)){ // File exists
+    File data_file = LittleFS.open(data_file_path, "a");
+    if (data_file) {
+      data_file.print("\n"); // Add new line every measurement
+      data_file.print(flow); // Add cycle counter value
+      data_file.print(";");
+      data_file.print(temp); // Add cycle counter value
+      data_file.print(";");
+      data_file.print(millis()); // Add cycle counter value
+      data_file.flush(); // Ensure writting before returning
+      data_file.close();
+    }
+  }
 }
 
 const char index_html[] PROGMEM = R"rawliteral(
@@ -270,17 +312,25 @@ const char index_html[] PROGMEM = R"rawliteral(
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     body { text-align: center; font-family: Arial; margin: 20px; }
-    canvas { width: 100%; max-width: 800px; height: 400px; margin-top: 20px; }
+    .chart-container {
+      position: relative;
+      width: 100%;
+      max-width: 800px;
+      height: 400px;   /* Fixed height */
+      margin: 20px auto;
+    }
     .info { margin-bottom: 20px; font-size: 1.4em; font-weight: bold; }
   </style>
 </head>
 <body>
   <h2>Gas Flow Monitor</h2>
   <div class="info">
-    Latest Flow: <span id="flow">0</span> SLM &nbsp;|&nbsp;
+    Sensor1 Gas Flow: <span id="flow">0</span> SLM &nbsp;|&nbsp;
     Temperature: <span id="temp">0</span> °C
   </div>
-  <canvas id="chart"></canvas>
+  <div class="chart-container">
+    <canvas id="chart"></canvas>
+  </div>
   <script>
     const ctx = document.getElementById('chart').getContext('2d');
     let flowData = new Array(30).fill(0);
@@ -300,8 +350,9 @@ const char index_html[] PROGMEM = R"rawliteral(
       options: {
         animation: false,
         responsive: true,
+        maintainAspectRatio: false,  // Important for fixed height
         scales: {
-          x: { title: { display: true, text: 'Seconds ago' } },
+          x: { title: { display: true, text: 'Time (s)' } },
           y: { beginAtZero: true }
         },
         plugins: {
@@ -324,28 +375,57 @@ const char index_html[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len) {
-  if (type == WS_EVT_CONNECT) {
-    //Serial.print("\n-->WebSocket client connected");
-  }
-}
 
 void setup() {
   Serial.begin(115200);                           // start serial for output
+  pinMode(GPIO_SET_ACCESS_POINT, INPUT_PULLUP);   // set Access point pin
   Wire.begin(SDA_PIN, SCL_PIN, I2C_MASTER_ADDR);  // join i2c bus (address optional for master)
   delay(100);
   Serial.print("\n\n-->SFM3003 driver begin");
   Serial.print("\n-->SFM3003 device at I2C addr: ");
   Serial.println(I2C_SLAVE_ADDR, HEX);
+
+  if (!LittleFS.begin()) {
+    Serial.print("\n-->SFM3003 LittleFS failed");
+      while(1);
+  }
+  // create Data files, if they do not exist
+  File new_file;
+  if (!LittleFS.exists(data_file_path)){ // File does not exist
+    new_file = LittleFS.open(data_file_path, "w");
+    if (!new_file) {
+      Serial.print("\n-->SFM3003 failed creating file ");
+      while(1);
+    }
+    else{
+      new_file.print(csv_header_description);
+      new_file.close();
+    }
+  }
+
+  // init sfm3003 sensor
   init_sfm3003_300_cl();
+
+  // wifi access point configuration
   WiFi.softAPConfig(local_IP, gateway, subnet);
   WiFi.softAP(ap_ssid, ap_password);
   Serial.print("\n-->WIFI AP AT: ");
   Serial.print(WiFi.softAPIP());
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/html", index_html);
-  });
-  ws.onEvent(onWsEvent);
+
+  // if config pine is low, go to FTP server mode
+  if (digitalRead(GPIO_SET_ACCESS_POINT) == LOW){
+    digitalWrite(LED_BUILTIN, LOW); // LED on
+    ftpSrv.begin(user_FTP, pwd_FTP);
+    ftpSrv.setLocalIp(WiFi.softAPIP());
+    while (digitalRead(GPIO_SET_ACCESS_POINT) == LOW) {
+      ftpSrv.handleFTP();
+      delay(10);
+    }
+  }
+
+  // web server configuration
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){request->send_P(200, "text/html", index_html);});
+  // ws.onEvent(onWsEvent);
   server.addHandler(&ws);
   server.begin();
 
