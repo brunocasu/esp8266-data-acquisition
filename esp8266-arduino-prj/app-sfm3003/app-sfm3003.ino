@@ -382,6 +382,7 @@ void setup() {
   Wire.begin(SDA_PIN, SCL_PIN, I2C_MASTER_ADDR);  // join i2c bus (address optional for master)
   delay(100);
   Serial.print("\n\n-->SFM3003 driver begin");
+  Serial.print("\n\n-->SFM3003 app-sfm3003 v1.0");
   Serial.print("\n-->SFM3003 device at I2C addr: ");
   Serial.println(I2C_SLAVE_ADDR, HEX);
 
