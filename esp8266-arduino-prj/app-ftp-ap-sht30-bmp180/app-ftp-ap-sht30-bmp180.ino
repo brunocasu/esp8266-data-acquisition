@@ -12,10 +12,10 @@
  * You should have received a copy of the GNU General Public License along with this program. If not,
  * see <https://www.gnu.org/licenses/>.
  *
- *  Created on: September 03, 2024
+ *  Created on: January 07, 2026
  *      Author: Bruno Casu
  *
- *  Version 1.0 (September 03, 2024)
+ *  Version 1.0 (January 07, 2026)
  */
  
 #include <ESP8266WiFi.h>
@@ -26,22 +26,20 @@
 #include <SimpleFTPServer.h> // Replacing <ESP8266FtpServer.h>
 #include <cozir.h>
 #include <sht30.h>
-//#include <LOLIN_HP303B.h>
+#include <Adafruit_BMP085.h>
 #include <math.h>
 
 #define SERIAL_SPEED  115200
-#define APP_VERSION "app-ftp-ap-sht30-hp303b_v2.0"
+#define APP_VERSION "app-ftp-ap-sht30-bmp180_v1.0"
 
 // Defines for the data aquisition system
 #define SHT30_I2C_ADDR_PIN_HIGH 0x45  // Jumper NOT connected
 #define SHT30_I2C_ADDR_PIN_LOW 0x44  // Jumper connected
-//#define HP303B_I2C_ADDR_PIN_HIGH 0x77  // Jumper NOT connected
-//#define HP303B_OVERSAMPLING_RATE  2  // From 1 to 7 (7 is  the highest oversampling rate)
 #define SLEEP_TIME_MS 1800000  // Interval between measurements in ms
 #define GPIO_SET_ACCESS_POINT 14 // On Wemos D1 Mini - Pin number 14 (GPIO14)
 
 // Remove when deploying in production environment
-#define DEBUG_MODE
+//#define DEBUG_MODE
 
 #define CYCLE_COUNTER_RST 10000000
 unsigned long cycle_counter = 0;
@@ -50,13 +48,13 @@ unsigned long cycle_counter = 0;
 SHT30 sht30_1_handler(SHT30_I2C_ADDR_PIN_HIGH); // Addr 0x45
 SHT30 sht30_2_handler(SHT30_I2C_ADDR_PIN_LOW); // Addr 0x44
 // Temperature and pressure sensor
-//LOLIN_HP303B hp303b_handler;
+Adafruit_BMP085 bmp; // Equivalent to BMP180 for Temperature and Pressure
 
 // WiFi Access Point configuration
 IPAddress local_IP(10,10,10,1); // FTP server address
 IPAddress gateway(10,10,10,1);
 IPAddress subnet_mask(255,255,255,0);
-const char* ssid_AP = "C01-AP-ESP8266"; // No password set
+const char* ssid_AP = "D00-AP-ESP8266"; // No password set
 
 // FTP server access configuration
 const char* user_FTP = "esp8266";
@@ -66,9 +64,9 @@ FtpServer ftpSrv; // Handler
 // LittleFs info
 FSInfo fs_info;
 
-const char* data_file_path = "/C01_data.csv";
+const char* data_file_path = "/D00_data.csv";
 // Added at the creation of the Data file
-const char* csv_header_description = "CTR;HP303B_T(C);HP303B_P(Pa);SHT30_45_T(C);SHT30_45_RH(%);SHT30_44_T(C);SHT30_44_RH(%);PPMV(Dry);DP(C);ABS_HUM(g/m3);EX_t(ms)"; 
+const char* csv_header_description = "CTR;BMP180_T(C);BMP180_P(Pa);SHT30_45_T(C);SHT30_45_RH(%);SHT30_44_T(C);SHT30_44_RH(%);PPMV(Dry);DP(C);ABS_HUM(g/m3);EX_t(ms)"; 
 
 /** PF definitions **/
 
@@ -196,9 +194,9 @@ void calculatePPMV(float *arr, float T, int32_t P_Pa, float RH){
  * Read and save sensor data on data file
  */
 void dataAcquisition(){
-  double hp_T=0;
-  int32_t temp; // not used (integer value of temeprature reading)
-  int32_t hp_P=0;
+  float bmp_T=0;
+  // int32_t temp; // not used (integer value of temeprature reading)
+  int32_t bmp_P=0;
   float sht_RH=0;
   float arr[5]={0}; // return values of the calculatePPMV func: [0]=Pws, [1]=Pw, [2]=ppmn, [3]=dew_point, [4]=abs_hum
   if (LittleFS.exists(data_file_path)){ // File exists
@@ -209,17 +207,17 @@ void dataAcquisition(){
     data_file.print("\n"); // Add new line every measurement
     data_file.print(cycle_counter); // Add cycle counter value
     data_file.print(";");
-    // Try to read HP303B
-    hp303b_handler.begin();
-    if(hp303b_handler.measureTempOnce(temp, HP303B_OVERSAMPLING_RATE) == 0){ // Temperature reading OK
-      hp_T = hp303b_handler.returnDoublePrecisionTemp();
-      data_file.print(hp_T, 2);
+    // Try to read BMP180
+    if(bmp.begin()){ // BMP180 Check OK
+      bmp_T = bmp.readTemperature(); // Celsius
+      bmp_P = bmp.readPressure(); // Pascal
+      data_file.print(bmp_T, 2);
+      data_file.print(";");
+      data_file.print(bmp_P);
+      data_file.print(";");
     }
-    data_file.print(";");
-    if(hp303b_handler.measurePressureOnce(hp_P, HP303B_OVERSAMPLING_RATE) == 0){ // Pressure reading OK
-      data_file.print(hp_P);
-    }
-    data_file.print(";");
+    else{data_file.print(";;");} // Empty data
+
     // Try to read SHT30 addr 45
     if(sht30_1_handler.read_single_shot() == SHT30_READ_OK){
       sht_RH = (float) sht30_1_handler.humidity; // To calculate the PPMV levels, the RH from SHT30 Addr 45 is used by default
@@ -239,7 +237,7 @@ void dataAcquisition(){
     }
     else{data_file.print(";;");} // Empty data
     // Calculate and write PPMV and DP values
-    calculatePPMV(arr, hp_T, hp_P, sht_RH);
+    calculatePPMV(arr, bmp_T, bmp_P, sht_RH);
     if (arr[0]!=0 && arr[1]!=0){
       data_file.print(arr[2], 0); // ppmv
       data_file.print(";");
@@ -255,10 +253,10 @@ void dataAcquisition(){
   }
 #ifdef DEBUG_MODE
   Serial.println("\n-->Sensor data:");
-  Serial.print("HP303B_T(C): ");
-  Serial.println(hp_T);
-  Serial.print("HP303B_P(Pa): ");
-  Serial.println(hp_P);
+  Serial.print("BMP180_T(C): ");
+  Serial.println(bmp_T);
+  Serial.print("BMP180_P(Pa): ");
+  Serial.println(bmp_P);
   Serial.print("SHT30_45_T(C): ");
   Serial.println(sht30_1_handler.cTemp);
   Serial.print("SHT30_45_RH(%): ");
@@ -283,7 +281,7 @@ void setup() {
 #ifdef DEBUG_MODE
   printDeviceInfo();
 #endif // DEBUG_MODE  
-
+  
   // Setup data files and read the sensors
   createDataFiles();
   dataAcquisition();

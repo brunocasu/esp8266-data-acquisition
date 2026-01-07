@@ -38,9 +38,10 @@ float co2_reading = 0;
 void wifiConnectLAN(void) {
   if (WiFi.status() != WL_CONNECTED) { //  If not connected, attempt connection
     digitalWrite(LED_BUILTIN, LOW); // Led is off when trying to connect
-    Serial.println("WiFi Attempting to connect...");
-
+    Serial.println("WiFi Attempting to connect to...");
     gf.beginWiFi(your_wifi_ssid, your_wifi_password);
+    Serial.println(your_wifi_ssid);
+    Serial.println(your_wifi_password);
     // Optional: wait until connected or timeout
     unsigned long startAttemptTime = millis();
     while (WiFi.status() != WL_CONNECTED && 
@@ -109,6 +110,7 @@ void dataAcquisition(void){
 void setup() {
   FCGF_DEBUG = false;
   Serial.begin(115200);
+  delay(1000); // Debug
   digitalWrite(LED_BUILTIN, LOW);
   pinMode(RELAY_PIN, OUTPUT); // Relay pin
   wifiConnectLAN(); // Connect to LAN
@@ -121,9 +123,8 @@ void loop() {
   delay(pumpOnTime);
 
   dataAcquisition(); // Read sensors
-  sendDataGForm(); // Send data to Google Forms
-
   Serial.println("\nMotor OFF");
   digitalWrite(RELAY_PIN, LOW); // Turn off pump
+  sendDataGForm(); // Send data to Google Forms
   delay(pumpOffTime);
 }
